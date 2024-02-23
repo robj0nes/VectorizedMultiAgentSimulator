@@ -614,6 +614,7 @@ class Environment(TorchVectorizedObject):
                 viewer_size_fit / cam_range, torch.tensor(zoom, device=self.device)
             )
             cam_range *= torch.max(viewer_size)
+
             self.viewer.set_bounds(
                 -cam_range[X],
                 cam_range[X],
