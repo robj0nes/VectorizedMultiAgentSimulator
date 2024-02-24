@@ -20,6 +20,7 @@ __all__ = [
 
 scenarios = sorted(
     [
+        "painting",
         "construction",
         "dropout",
         "dispersion",

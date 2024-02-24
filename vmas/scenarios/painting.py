@@ -16,6 +16,16 @@ from vmas.simulator.utils import AGENT_REWARD_TYPE, AGENT_OBS_TYPE, ScenarioUtil
 #   3. Rewards: best practise for rewarding on agent distance from goal.
 
 class Scenario(BaseScenario):
+    def __init__(self):
+        super().__init__()
+        self.rew = None
+        self.goal_col_obs = None
+        self.arena_size = None
+        self.n_goals = None
+        self.agent_radius = None
+        self.n_agents = None
+        self.goals = None
+
     def make_world(self, batch_dim: int, device: torch.device, **kwargs) -> World:
         self.n_agents = kwargs.get("n_agents", 4)
         self.agent_radius = 0.2
@@ -37,7 +47,7 @@ class Scenario(BaseScenario):
                 color=agent_cols[i]
             )
             # Question: Is this the best place to add this.. ?
-            agent.payload = torch.stack([torch.tensor(agent.color) for _ in range(batch_dim)])
+            agent.payload = torch.tensor(agent.color, device=device).expand(batch_dim, -1)
             world.add_agent(agent)
 
         self.goals = []
@@ -46,10 +56,14 @@ class Scenario(BaseScenario):
                 name=f"goal_{i}",
                 collide=False,
                 shape=Box(length=self.agent_radius * 2, width=self.agent_radius * 2),
-                color=goal_cols[i]
+                # For debugging setting goal0 == agent0 payload
+                color=goal_cols[i] if i != 0 else world.agents[i].color
             )
             self.goals.append(goal)
             world.add_landmark(goal)
+
+        # Flatten colours into shape [Batch dim, n_goals * RGB] for later observations.
+        self.goal_col_obs = torch.tensor(list(sum(goal_cols, ())), device=device).expand(batch_dim, -1)
 
         world.spawn_map()
 
@@ -59,11 +73,16 @@ class Scenario(BaseScenario):
 
     def random_paint_generator(self):
         agent_cols = self.get_distinct_color_list()
-        ran_agent_cols = agent_cols.copy()
-        random.shuffle(ran_agent_cols)
-        # TODO: number of goals should be dynamic.
-        goal_cols = [tuple(((torch.tensor(x) + torch.tensor(y)) / 2).tolist()) for (x, y) in
-                     zip(ran_agent_cols[:self.n_goals], ran_agent_cols[self.n_goals:])]
+        # TODO: Remove eventually - For trivial test problem: setting goals equal to random agent payload (no paint
+        #  mixing required)
+        ran_ints = random.sample(range(len(agent_cols)), self.n_goals)
+        goal_cols = [agent_cols[i] for i in ran_ints]
+
+        # # TODO: create a set of n_goals from a mix of RGB agent payloads.
+        # ran_agent_cols = agent_cols.copy()
+        # random.shuffle(ran_agent_cols)
+        # goal_cols = [tuple(((torch.tensor(x) + torch.tensor(y)) / 2).tolist()) for (x, y) in
+        #              zip(ran_agent_cols[:self.n_goals], ran_agent_cols[self.n_goals:])]
         return agent_cols, goal_cols
 
     def get_distinct_color_list(self):
@@ -81,31 +100,27 @@ class Scenario(BaseScenario):
         )
 
         agent_cols, goal_cols = self.random_paint_generator()
+
         for i, agent in enumerate(self.world.agents):
             agent.color = agent_cols[i]
-            if i == 0:
-                agent.payload = torch.stack(
-                    [torch.tensor(goal_cols[0]) if i % 2 == 0
-                     else torch.tensor(agent.color) for i in
-                     range(self.world.batch_dim)])
-            else:
-                agent.payload = torch.stack([torch.tensor(agent.color) for _ in range(self.world.batch_dim)])
+            agent.payload = (torch.tensor(agent.color, device=self.world.device)
+                             .expand(self.world.batch_dim, -1))
 
         for i, goal in enumerate(self.goals):
             goal.color = goal_cols[i]
 
+        # Reset observable goal colours
+        self.goal_col_obs = (torch.tensor(list(sum(goal_cols, ())), device=self.world.device)
+                             .expand(self.world.batch_dim, -1))
+
     def reset_world_at(self, env_index: int = None):
-        self.world.reset_map(env_index)
         self.reset_agents(env_index)
+        self.world.reset_map(env_index)
 
     def observation(self, agent: DOTSAgent) -> AGENT_OBS_TYPE:
         # Question: Should these be assigned to device?
-        # Shape = [Batch size, n_goals * 2] (Position of goals (stacked))
+        # Shape = [Batch size, n_goals * 2] (Position of goals (x,y concatenated))
         goal_dists = torch.cat([goal.state.pos - agent.state.pos for goal in self.goals], dim=-1)
-
-        # Shape = [Batch size, n_goals * 3] (RGB Colors of goals (stacked))
-        goal_colors = torch.stack([torch.cat([torch.tensor(list(goal.color)) for goal in self.goals], dim=-1) for _ in
-                                   range(self.world.batch_dim)])
 
         return torch.cat(
             [
@@ -113,7 +128,7 @@ class Scenario(BaseScenario):
                 agent.state.vel,
                 agent.payload,
                 goal_dists,
-                goal_colors
+                self.goal_col_obs
             ],
             dim=-1,
         )
@@ -125,9 +140,17 @@ class Scenario(BaseScenario):
             # We want floor(sum(match) / 3) as we are looking for a complete RGB match
             [(torch.floor(torch.sum(torch.eq(agent.payload, torch.tensor(goal.color)), dim=-1) / 3))
              for goal in self.goals]).to(self.world.device)
-        dists = torch.stack([self.world.get_distance(agent, goal) for goal in self.goals]).to(self.world.device)
 
-        self.rew = torch.sum(color_match * dists, dim=0)
+        dists = torch.stack(
+            [torch.linalg.vector_norm((agent.state.pos - goal.state.pos), dim=-1) for goal in self.goals]).to(
+            self.world.device)
+
+        # TODO: Temporary to establish a min radius
+        # Question: There must be something like this here already.. ?
+        min_dist = 2
+        dists[dists >= min_dist] = float('inf')
+
+        self.rew = torch.sum(color_match * 1 / dists, dim=0)
         self.rew[self.rew == float('inf')] = 0
         return self.rew
 
@@ -146,5 +169,5 @@ if __name__ == '__main__':
     render_interactively(
         __file__,
         n_agents=4,
-        n_goals=2
+        n_goals=1
     )
