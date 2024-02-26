@@ -12,8 +12,9 @@ from vmas.simulator.utils import AGENT_REWARD_TYPE, AGENT_OBS_TYPE, ScenarioUtil
 
 # Question:
 #   1. How can I define agent action space
-#   2. Advice on adding batched properties properly (eg. payload)
-#   3. Rewards: best practise for rewarding on agent distance from goal.
+#   2. Advice on adding batched properties properly (eg. agent.colour, goal.colour, payload)
+#   3. Rewards: Advice on how to form well structured reward signals...
+#   4. Extending the evaluation video length.
 
 class Scenario(BaseScenario):
     def __init__(self):
@@ -67,7 +68,7 @@ class Scenario(BaseScenario):
 
         world.spawn_map()
 
-        # # TODO: Reward for position relative to goal (iff. correct color) and correct color mixing.
+        # # TODO: Reward for position relative to goal iff. correct color.
         self.rew = torch.zeros(batch_dim, device=device, dtype=torch.float32)
         return world
 
@@ -150,6 +151,8 @@ class Scenario(BaseScenario):
         min_dist = 2
         dists[dists >= min_dist] = float('inf')
 
+        # TODO: Need a negative reward for positioning over incorrect goal?
+
         self.rew = torch.sum(color_match * 1 / dists, dim=0)
         self.rew[self.rew == float('inf')] = 0
         return self.rew
@@ -169,5 +172,5 @@ if __name__ == '__main__':
     render_interactively(
         __file__,
         n_agents=4,
-        n_goals=1
+        n_goals=4
     )
