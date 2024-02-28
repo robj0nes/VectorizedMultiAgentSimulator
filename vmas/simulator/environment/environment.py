@@ -539,7 +539,7 @@ class Environment(TorchVectorizedObject):
         """
         self._check_batch_index(env_index)
         assert (
-            mode in self.metadata["render.modes"]
+                mode in self.metadata["render.modes"]
         ), f"Invalid mode {mode} received, allowed modes: {self.metadata['render.modes']}"
         if agent_index_focus is not None:
             assert 0 <= agent_index_focus < self.n_agents, (
@@ -601,13 +601,13 @@ class Environment(TorchVectorizedObject):
                 [agent.shape.circumscribed_radius() for agent in self.world.agents]
             )
             viewer_size_fit = (
-                torch.stack(
-                    [
-                        torch.max(torch.abs(all_poses[:, X])),
-                        torch.max(torch.abs(all_poses[:, Y])),
-                    ]
-                )
-                + 2 * max_agent_radius
+                    torch.stack(
+                        [
+                            torch.max(torch.abs(all_poses[:, X])),
+                            torch.max(torch.abs(all_poses[:, Y])),
+                        ]
+                    )
+                    + 2 * max_agent_radius
             )
 
             viewer_size = torch.maximum(
@@ -629,7 +629,7 @@ class Environment(TorchVectorizedObject):
                 pos[X] + cam_range[X],
                 pos[Y] - cam_range[Y],
                 pos[Y] + cam_range[Y],
-            )
+                )
 
         # Render
         self._set_agent_comm_messages(env_index)
@@ -657,6 +657,9 @@ class Environment(TorchVectorizedObject):
 
         for entity in self.world.entities:
             self.viewer.add_onetime_list(entity.render(env_index=env_index))
+
+        # Add list of geoms to render on top of all world entities.
+        self.viewer.add_onetime_list(self.scenario.top_layer_render(env_index))
 
         # render to display or array
         return self.viewer.render(return_rgb_array=mode == "rgb_array")
