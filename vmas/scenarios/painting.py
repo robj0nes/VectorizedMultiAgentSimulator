@@ -7,7 +7,6 @@ import seaborn as sns
 from vmas import render_interactively
 from vmas.simulator.core import Landmark, Sphere, World, Box
 from vmas.simulator.dots_core import DOTSWorld, DOTSAgent
-from vmas.simulator.rendering import Geom
 from vmas.simulator.scenario import BaseScenario
 from vmas.simulator.utils import AGENT_REWARD_TYPE, AGENT_OBS_TYPE, ScenarioUtils, Y, X, Color
 
@@ -182,7 +181,7 @@ class Scenario(BaseScenario):
         # TODO: Return a dictionary of reward signals to provide debugging/logging info.
         return {"reward": self.rew}
 
-    def top_layer_render(self, env_index: int = 0) -> "List[Geom]":
+    def top_layer_render(self, env_index: int = 0):
         from vmas.simulator import rendering
         geoms = []
         for agent in self.world.agents:
