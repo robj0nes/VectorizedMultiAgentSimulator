@@ -139,12 +139,11 @@ class Scenario(BaseScenario):
         # We find any goal color which matches the current payload color and reward based on distance from goal
         color_match = torch.stack(
             # We want floor(sum(match) / 3) as we are looking for a complete RGB match
-            [(torch.floor(torch.sum(torch.eq(agent.payload, torch.tensor(goal.color)), dim=-1) / 3))
+            [(torch.floor(torch.sum(torch.eq(agent.payload, torch.tensor(goal.color, device=self.world.device)), dim=-1) / 3))
              for goal in self.goals]).to(self.world.device)
 
         dists = torch.stack(
-            [torch.linalg.vector_norm((agent.state.pos - goal.state.pos), dim=-1) for goal in self.goals]).to(
-            self.world.device)
+            [torch.linalg.vector_norm((agent.state.pos - goal.state.pos), dim=-1) for goal in self.goals])
 
         # TODO: Temporary to establish a min radius
         # Question: There must be something like this here already.. ?
