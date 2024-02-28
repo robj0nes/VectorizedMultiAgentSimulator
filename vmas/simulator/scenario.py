@@ -263,6 +263,18 @@ class BaseScenario(ABC):
         """
         return []
 
+    def top_layer_render(self, env_index: int = 0) -> "List[Geom]":
+        """
+        This function facilitates additional user/scenario-level rendering for a specific environment index.
+        This function will be called last by the environment to ensure rendering on-top of entities.
+        The returned list is a list of geometries. It is the user's responsibility to set attributes such as color,
+        position and rotation.
+
+        :param env_index: index of the environment to render.
+        :return: A list of geometries to render for the current time step.
+        """
+        return []
+
     def process_action(self, agent: Agent):
         """
         This function can be overridden to process the agent actions before the simulation step.
