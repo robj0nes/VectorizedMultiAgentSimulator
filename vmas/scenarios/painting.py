@@ -7,7 +7,6 @@ import seaborn as sns
 from vmas import render_interactively
 from vmas.simulator.core import Landmark, Sphere, World, Box
 from vmas.simulator.dots_core import DOTSWorld, DOTSAgent
-from vmas.simulator.rendering import Geom
 from vmas.simulator.scenario import BaseScenario
 from vmas.simulator.utils import AGENT_REWARD_TYPE, AGENT_OBS_TYPE, ScenarioUtils, Y, X, Color
 
@@ -76,6 +75,8 @@ class Scenario(BaseScenario):
 
         # # TODO: Reward for position relative to goal iff. correct color.
         self.rew = torch.zeros(batch_dim, device=device, dtype=torch.float32)
+        self.pos_rew = torch.zeros(batch_dim, device=device, dtype=torch.float32)
+        self.final_rew = self.pos_rew.clone()
         return world
 
     def random_paint_generator(self, device: torch.device):
@@ -145,32 +146,70 @@ class Scenario(BaseScenario):
             dim=-1,
         )
 
+    # def reward(self, agent: DOTSAgent) -> AGENT_REWARD_TYPE:
+    #     # Question: Do I need to assign these to device?
+    #     # We find any goal color which matches the current payload color and reward based on distance from goal
+    #     color_match = torch.stack(
+    #         # We want floor(sum(match) / 3) as we are looking for a complete RGB match
+    #         [(torch.floor(
+    #             torch.sum(torch.eq(agent.state.payload, goal.color.clone().detach().requires_grad_(True)),
+    #                       dim=-1) / 3))
+    #             for goal in self.goals])
+    #
+    #
+    #     dists = torch.stack(
+    #         [torch.linalg.vector_norm((agent.state.pos - goal.state.pos), dim=-1) for goal in self.goals])
+    #
+    #     # TODO: Temporary to establish a min radius
+    #     # Question: There must be something like this here already.. ?
+    #     min_dist = 1
+    #     dists[dists >= min_dist] = float('inf')
+    #
+    #     # TODO: Need a negative reward for positioning over incorrect goal?
+    #     # Question: Should this be generating a per-agent reward signal?
+    #     # Reward is inverse distance to matching goal colour.
+    #     agent_rew = torch.sum(color_match * 1 / dists, dim=0)
+    #     agent_rew[agent_rew == float('inf')] = 0
+    #
+    #     return agent_rew
+
     def reward(self, agent: DOTSAgent) -> AGENT_REWARD_TYPE:
-        # Question: Do I need to assign these to device?
-        # We find any goal color which matches the current payload color and reward based on distance from goal
-        color_match = torch.stack(
-            # We want floor(sum(match) / 3) as we are looking for a complete RGB match
-            [(torch.floor(
-                torch.sum(torch.eq(agent.state.payload, goal.color.clone().detach().requires_grad_(True)),
-                          dim=-1) / 3))
-                for goal in self.goals])
+        is_first = agent == self.world.agents[0]
 
+        if is_first:
+            self.pos_rew[:] = 0
+            self.final_rew[:] = 0
 
-        dists = torch.stack(
-            [torch.linalg.vector_norm((agent.state.pos - goal.state.pos), dim=-1) for goal in self.goals])
+            for agent in self.world.agents:
+                color_match = torch.stack(
+                    # We want floor(sum(match) / 3) as we are looking for a complete RGB match
+                    [(torch.floor(
+                        torch.sum(torch.eq(agent.state.payload, goal.color.clone().detach().requires_grad_(True)),
+                                  dim=-1) / 3))
+                        for goal in self.goals])
 
-        # TODO: Temporary to establish a min radius
-        # Question: There must be something like this here already.. ?
-        min_dist = 1
-        dists[dists >= min_dist] = float('inf')
+                dists = torch.stack(
+                    [torch.linalg.vector_norm((agent.state.pos - goal.state.pos), dim=-1) for goal in self.goals])
 
-        # TODO: Need a negative reward for positioning over incorrect goal?
-        # Question: Should this be generating a per-agent reward signal?
-        # Reward is inverse distance to matching goal colour.
-        agent_rew = torch.sum(color_match * 1 / dists, dim=0)
-        agent_rew[agent_rew == float('inf')] = 0
+                # TODO: Temporary to establish a min radius
+                # Question: There must be something like this here already.. ?
+                min_dist = 1
+                dists[dists >= min_dist] = float('inf')
 
-        return agent_rew
+                # TODO: Need a negative reward for positioning over incorrect goal?
+                # Question: Should this be generating a per-agent reward signal?
+                # Reward is inverse distance to matching goal colour.
+                agent_rew = torch.sum(color_match * 1 / dists, dim=0)
+                agent_rew[agent_rew == float('inf')] = 0
+
+                self.pos_rew += agent_rew
+
+                # TODO: Calculate a final reward if on goal..
+
+        return (
+                self.pos_rew +
+                self.final_rew
+        )
 
     def done(self):
         # TODO: This is placeholder.. Return a task completion signal.
@@ -182,7 +221,7 @@ class Scenario(BaseScenario):
         # TODO: Return a dictionary of reward signals to provide debugging/logging info.
         return {"reward": self.rew}
 
-    def top_layer_render(self, env_index: int = 0) -> "List[Geom]":
+    def top_layer_render(self, env_index: int = 0):
         from vmas.simulator import rendering
         geoms = []
         for agent in self.world.agents:
