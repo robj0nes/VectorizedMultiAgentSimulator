@@ -51,8 +51,8 @@ class Scenario(BaseScenario):
             )
             # Question: I want to set unique agent colours along the batch dimension (equal to payload)
             world.add_agent(agent)
-            # payload = agent.agent_payload[i].unsqueeze(0).repeat(self.world.batch_dim, 1)
-            # agent.set_payload(payload, batch_index=env_index)
+            agent.agent_collision_rew = torch.zeros(batch_dim, device=device)
+            agent.obstacle_collision_rew = agent.agent_collision_rew.clone()
 
         self.goals = []
         for i in range(self.n_goals):
@@ -72,6 +72,11 @@ class Scenario(BaseScenario):
         self.goal_col_obs = goal_cols.reshape(-1).unsqueeze(0).repeat(batch_dim, 1)
 
         world.spawn_map()
+
+        self.agent_collision_penalty = kwargs.get("agent_collision_penalty", -1)
+        self.wall_collision_penalty = kwargs.get("passage_collision_penalty", -1)
+        self.pos_shaping_factor = kwargs.get("position_shaping_factor", 0)
+        self.min_collision_distance = 0.005
 
         # # TODO: Reward for position relative to goal iff. correct color.
         self.rew = torch.zeros(batch_dim, device=device, dtype=torch.float32)
@@ -108,9 +113,6 @@ class Scenario(BaseScenario):
             y_bounds=(int(-self.arena_size / 2), int(self.arena_size / 2))
         )
 
-        # TODO: Return tensors of following shapes:
-        #   - agent_cols: [batch_dims, n_agents, 3]
-        #   - goal_cols: [batch_dims, n_goals, 3]
         agent_payload, goal_cols = self.random_paint_generator(self.world.device)
 
         # Question can we set agent and goal colors across the batches..?
@@ -125,6 +127,24 @@ class Scenario(BaseScenario):
         # Reset observable goal colours
         # Expand goal cols into shape [Batch dim, n_goals * RGB] for later observations.
         self.goal_col_obs = goal_cols.reshape(-1).unsqueeze(0).repeat(self.world.batch_dim, 1)
+
+        # Preliminary position shaping to all goals.
+        for agent in self.world.agents:
+            if env_index is None:
+                agent.shaping = (
+                        torch.stack(
+                            [torch.linalg.vector_norm((agent.state.pos - goal.state.pos), dim=-1) for goal in
+                             self.goals])
+                        * self.pos_shaping_factor
+                )
+            else:
+                agent.shaping[env_index] = (
+                        torch.stack(
+                            [torch.linalg.vector_norm((agent.state.pos[env_index] - goal.state.pos[env_index]), dim=-1)
+                             for goal in
+                             self.goals])
+                        * self.pos_shaping_factor
+                )
 
     def reset_world_at(self, env_index: int = None):
         self.reset_agents(env_index)
@@ -146,33 +166,6 @@ class Scenario(BaseScenario):
             dim=-1,
         )
 
-    # def reward(self, agent: DOTSAgent) -> AGENT_REWARD_TYPE:
-    #     # Question: Do I need to assign these to device?
-    #     # We find any goal color which matches the current payload color and reward based on distance from goal
-    #     color_match = torch.stack(
-    #         # We want floor(sum(match) / 3) as we are looking for a complete RGB match
-    #         [(torch.floor(
-    #             torch.sum(torch.eq(agent.state.payload, goal.color.clone().detach().requires_grad_(True)),
-    #                       dim=-1) / 3))
-    #             for goal in self.goals])
-    #
-    #
-    #     dists = torch.stack(
-    #         [torch.linalg.vector_norm((agent.state.pos - goal.state.pos), dim=-1) for goal in self.goals])
-    #
-    #     # TODO: Temporary to establish a min radius
-    #     # Question: There must be something like this here already.. ?
-    #     min_dist = 1
-    #     dists[dists >= min_dist] = float('inf')
-    #
-    #     # TODO: Need a negative reward for positioning over incorrect goal?
-    #     # Question: Should this be generating a per-agent reward signal?
-    #     # Reward is inverse distance to matching goal colour.
-    #     agent_rew = torch.sum(color_match * 1 / dists, dim=0)
-    #     agent_rew[agent_rew == float('inf')] = 0
-    #
-    #     return agent_rew
-
     def reward(self, agent: DOTSAgent) -> AGENT_REWARD_TYPE:
         is_first = agent == self.world.agents[0]
 
@@ -181,34 +174,48 @@ class Scenario(BaseScenario):
             self.final_rew[:] = 0
 
             for agent in self.world.agents:
+                # Returns a tensor of goals with the same colour as the payload.
                 color_match = torch.stack(
-                    # We want floor(sum(match) / 3) as we are looking for a complete RGB match
                     [(torch.floor(
                         torch.sum(torch.eq(agent.state.payload, goal.color.clone().detach().requires_grad_(True)),
                                   dim=-1) / 3))
                         for goal in self.goals])
 
+                # Returns distances to all goals.
                 dists = torch.stack(
                     [torch.linalg.vector_norm((agent.state.pos - goal.state.pos), dim=-1) for goal in self.goals])
 
-                # TODO: Temporary to establish a min radius
-                # Question: There must be something like this here already.. ?
-                min_dist = 1
-                dists[dists >= min_dist] = float('inf')
+                # Perform position shaping on goal distances
+                pos_shaping = dists * self.pos_shaping_factor
+                shaped_dists = agent.shaping - pos_shaping
+                agent.shaping = pos_shaping
 
-                # TODO: Need a negative reward for positioning over incorrect goal?
-                # Question: Should this be generating a per-agent reward signal?
-                # Reward is inverse distance to matching goal colour.
-                agent_rew = torch.sum(color_match * 1 / dists, dim=0)
-                agent_rew[agent_rew == float('inf')] = 0
+                self.pos_rew += (shaped_dists * color_match).sum(dim=0)
 
-                self.pos_rew += agent_rew
+                # TODO: Calculate a final reward if agent is on goal and correct colour.
 
-                # TODO: Calculate a final reward if on goal..
+            agent.agent_collision_rew[:] = 0
+            agent.obstacle_collision_rew[:] = 0
+            for a in self.world.agents:
+                if a != agent:
+                    agent.agent_collision_rew[
+                        self.world.get_distance(agent, a) <= self.min_collision_distance
+                        ] += self.agent_collision_penalty
+            for l in self.world.landmarks:
+                if self.world.collides(agent, l):
+                    if l in self.world.walls:
+                        penalty = self.wall_collision_penalty
+                    else:
+                        penalty = 0
+                    agent.obstacle_collision_rew[
+                        self.world.get_distance(agent, l) <= self.min_collision_distance
+                        ] += penalty
 
         return (
-                self.pos_rew +
-                self.final_rew
+                self.pos_rew
+                + self.final_rew
+                + agent.obstacle_collision_rew
+                + agent.agent_collision_rew
         )
 
     def done(self):

@@ -90,6 +90,7 @@ class DOTSAgentState(AgentState):
 class DOTSWorld(World):
     def __init__(self, batch_dim, device, **kwargs):
         super().__init__(batch_dim, device, **kwargs)
+        self.walls = None
         self.device = device
         self.arena_size = 5
         self.viewer_zoom = 1.7
