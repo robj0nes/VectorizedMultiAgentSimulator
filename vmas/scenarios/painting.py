@@ -49,7 +49,6 @@ class Scenario(BaseScenario):
                 color=Color.GREEN,
                 payload_shape=3
             )
-            # Question: I want to set unique agent colours along the batch dimension (equal to payload)
             world.add_agent(agent)
             agent.agent_collision_rew = torch.zeros(batch_dim, device=device)
             agent.obstacle_collision_rew = agent.agent_collision_rew.clone()
@@ -64,8 +63,8 @@ class Scenario(BaseScenario):
                 color=goal_cols[i]
             )
             self.goals.append(goal)
-            # Question: Similar to agents, I want to set goal colours along the batch dimension so they are unique in
-            #  each env instance.
+            # TODO: Add a goal property for expected payload, similar to agent payload and implement similar
+            #  rendering function.
             world.add_landmark(goal)
 
         # Expand goal cols into shape [Batch dim, n_goals * RGB] for later observations.
@@ -75,7 +74,7 @@ class Scenario(BaseScenario):
 
         self.agent_collision_penalty = kwargs.get("agent_collision_penalty", 0)
         self.wall_collision_penalty = kwargs.get("passage_collision_penalty", 0)
-        self.pos_shaping_factor = kwargs.get("position_shaping_factor", 0)
+        self.pos_shaping_factor = kwargs.get("position_shaping_factor", 1.0)
         self.min_collision_distance = 0.005
 
         # # TODO: Reward for position relative to goal iff. correct color.
