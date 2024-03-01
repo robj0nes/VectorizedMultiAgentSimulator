@@ -75,7 +75,7 @@ class Scenario(BaseScenario):
 
         self.agent_collision_penalty = kwargs.get("agent_collision_penalty", 0)
         self.wall_collision_penalty = kwargs.get("passage_collision_penalty", 0)
-        self.pos_shaping_factor = kwargs.get("position_shaping_factor", 0)
+        self.pos_shaping_factor = kwargs.get("position_shaping_factor", 1.0)
         self.min_collision_distance = 0.005
 
         # # TODO: Reward for position relative to goal iff. correct color.
