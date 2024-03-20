@@ -152,10 +152,11 @@ def use_vmas_env(
 
 if __name__ == "__main__":
     use_vmas_env(
-        scenario_name="painting",
+        scenario_name="simple_world_comm",
         render=True,
         save_render=False,
         random_action=False,
         continuous_actions=True,
-        n_steps=1000
+        n_steps=1000,
+        n_agents=2,
     )

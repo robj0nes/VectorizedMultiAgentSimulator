@@ -265,8 +265,8 @@ class BaseScenario(ABC):
 
     def top_layer_render(self, env_index: int = 0) -> "List[Geom]":
         """
-        This function facilitates additional user/scenario-level rendering for a specific environment index.
-        This function will be called last by the environment to ensure rendering on-top of entities.
+        This function facilitates is the same as extra_render, but will be called last by the environment
+        to ensure rendering on-top of entities.
         The returned list is a list of geometries. It is the user's responsibility to set attributes such as color,
         position and rotation.
 

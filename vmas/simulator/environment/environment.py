@@ -376,6 +376,8 @@ class Environment(TorchVectorizedObject):
         if not self.grad_enabled:
             action = action.detach()
         action = action.to(self.device)
+        if action.isnan().any():
+            print()
         assert not action.isnan().any()
         agent.action.u = torch.zeros(
             self.batch_dim, agent.action_size, device=self.device, dtype=torch.float32
