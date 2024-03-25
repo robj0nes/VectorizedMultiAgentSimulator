@@ -156,21 +156,33 @@ class Scenario(BaseScenario):
         # Forms a list of tensors [distX, distY, R, G, B] for each goal. TODO: Seems too hard to learn..?
         #   Shape [Batch size, n_goals * (2 + payload_dims)]
         if self.observe_all_goals:
-            goals = [torch.cat([goal.state.pos - agent.state.pos, goal.state.expected_payload], dim=-1) for goal in
-                     self.goals]
+            goals = [
+                torch.cat(
+                    [
+                        goal.state.pos - agent.state.pos,
+                        goal.state.expected_payload
+                    ],
+                    dim=-1)
+                for goal in self.goals
+            ]
+
         else:
             # Restrict observations to just the correctly coloured goal.
-            # TODO: Currently assumes all goals and payloads are the same along the batch dim.
-            #  This wont hold later on..
-            goals = [torch.cat([goal.state.pos - agent.state.pos, goal.state.expected_payload], dim=-1) for goal in
-                     self.goals if torch.any(goal.state.expected_payload[0] == agent.state.payload[0])]
+            goals = [
+                torch.cat(
+                    [
+                        goal.state.pos - agent.state.pos
+                    ],
+                    dim=-1)
+                for goal in self.goals if torch.any(torch.eq(goal.state.expected_payload, agent.state.payload))
+            ]
 
         return torch.cat(
             [
                 agent.state.pos,
                 agent.state.vel,
+                agent.state.payload
             ]
-            + [agent.state.payload]
             + [*goals],
             dim=-1,
         )
