@@ -151,7 +151,15 @@ class Scenario(BaseScenario):
         self.world.reset_map(env_index)
 
     def observation(self, agent: DOTSAgent) -> AGENT_OBS_TYPE:
-        # TODO: Add dists to other agents?
+        # TODO: Test if adding this reduces collisions/improves training..
+        # Get vector norm distance to all other agents.
+        other_agents = torch.transpose(
+            torch.stack(
+                [
+                    torch.linalg.vector_norm((agent.state.pos - a.state.pos), dim=1)
+                    for a in self.world.agents if a != agent
+                ]
+            ), 0, 1)
 
         # Forms a list of tensors [distX, distY, R, G, B] for each goal. TODO: Seems too hard to learn..?
         #   Shape [Batch size, n_goals * (2 + payload_dims)]
@@ -178,12 +186,13 @@ class Scenario(BaseScenario):
             ]
 
         return torch.cat(
-            [
-                agent.state.pos,
-                agent.state.vel,
-                agent.state.payload
-            ]
-            + [*goals],
+            ([
+                 agent.state.pos,
+                 agent.state.vel,
+                 agent.state.payload
+             ]
+             + [*goals]
+             + [other_agents]),
             dim=-1,
         )
 
