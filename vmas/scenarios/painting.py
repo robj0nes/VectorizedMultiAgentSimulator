@@ -248,7 +248,7 @@ class Scenario(BaseScenario):
             self.final_rew[:] = 0
             for a in self.world.agents:
                 self.final_rew += a.agent_final_reward
-            self.final_rew[self.final_rew < self.n_agents * self.final_reward] = 0
+            self.final_rew[self.final_rew < self.final_reward] = 0
 
         return (
                 agent.agent_pos_reward
@@ -307,4 +307,5 @@ if __name__ == '__main__':
         __file__,
         n_agents=3,
         n_goals=3,
+        pos_shaping=True,
     )
