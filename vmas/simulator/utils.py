@@ -5,7 +5,7 @@ import importlib
 import os
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import List, Tuple, Union, Dict, Sequence
+from typing import Dict, List, Sequence, Tuple, Union
 
 import numpy as np
 import torch
@@ -74,7 +74,7 @@ def _init_pyglet_device():
         )
 
 
-class Observable(ABC):
+class Observable:
     def __init__(self):
         self._observers = []
 
@@ -217,6 +217,12 @@ class TorchUtils:
         else:
             for val in value:
                 TorchUtils.recursive_require_grad_(val)
+
+    @staticmethod
+    def where_from_index(env_index, new_value, old_value):
+        mask = torch.zeros_like(old_value, dtype=torch.bool, device=old_value.device)
+        mask[env_index] = True
+        return torch.where(mask, new_value, old_value)
 
 
 class ScenarioUtils:

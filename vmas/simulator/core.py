@@ -7,7 +7,7 @@ from __future__ import annotations
 import math
 import typing
 from abc import ABC, abstractmethod
-from typing import Callable, List, Tuple, Union, Sequence
+from typing import Callable, List, Sequence, Tuple, Union
 
 import torch
 from torch import Tensor
@@ -16,27 +16,27 @@ from vmas.simulator.dynamics.common import Dynamics
 from vmas.simulator.dynamics.holonomic import Holonomic
 from vmas.simulator.joints import Joint
 from vmas.simulator.physics import (
-    _get_closest_point_line,
-    _get_closest_point_box,
-    _get_closest_line_box,
     _get_closest_box_box,
+    _get_closest_line_box,
+    _get_closest_point_box,
+    _get_closest_point_line,
     _get_closest_points_line_line,
     _get_inner_point_box,
 )
 from vmas.simulator.sensors import Sensor
 from vmas.simulator.utils import (
+    ANGULAR_FRICTION,
+    COLLISION_FORCE,
     Color,
+    DRAG,
+    JOINT_FORCE,
+    LINE_MIN_DIST,
+    LINEAR_FRICTION,
+    Observable,
+    override,
+    TorchUtils,
     X,
     Y,
-    override,
-    LINE_MIN_DIST,
-    COLLISION_FORCE,
-    JOINT_FORCE,
-    Observable,
-    DRAG,
-    LINEAR_FRICTION,
-    ANGULAR_FRICTION,
-    TorchUtils,
 )
 
 if typing.TYPE_CHECKING:
@@ -282,12 +282,22 @@ class EntityState(TorchVectorizedObject):
         self._rot = rot.to(self._device)
 
     def _reset(self, env_index: typing.Optional[int]):
-        for attr in [self.pos, self.rot, self.vel, self.ang_vel]:
+        for attr_name in ["pos", "rot", "vel", "ang_vel"]:
+            attr = self.__getattribute__(attr_name)
             if attr is not None:
                 if env_index is None:
-                    attr[:] = 0.0
+                    self.__setattr__(attr_name, torch.zeros_like(attr))
                 else:
-                    attr[env_index] = 0.0
+                    self.__setattr__(
+                        attr_name,
+                        TorchUtils.where_from_index(env_index, 0, attr),
+                    )
+
+    def zero_grad(self):
+        for attr_name in ["pos", "rot", "vel", "ang_vel"]:
+            attr = self.__getattribute__(attr_name)
+            if attr is not None:
+                self.__setattr__(attr_name, attr.detach())
 
     def _spawn(self, dim_c: int, dim_p: int):
         self.pos = torch.zeros(
@@ -363,13 +373,25 @@ class AgentState(EntityState):
 
     @override(EntityState)
     def _reset(self, env_index: typing.Optional[int]):
-        for attr in [self.c, self.force, self.torque]:
+        for attr_name in ["c", "force", "torque"]:
+            attr = self.__getattribute__(attr_name)
             if attr is not None:
                 if env_index is None:
-                    attr[:] = 0.0
+                    self.__setattr__(attr_name, torch.zeros_like(attr))
                 else:
-                    attr[env_index] = 0.0
+                    self.__setattr__(
+                        attr_name,
+                        TorchUtils.where_from_index(env_index, 0, attr),
+                    )
         super()._reset(env_index)
+
+    @override(EntityState)
+    def zero_grad(self):
+        for attr_name in ["c", "force", "torque"]:
+            attr = self.__getattribute__(attr_name)
+            if attr is not None:
+                self.__setattr__(attr_name, attr.detach())
+        super().zero_grad()
 
     @override(EntityState)
     def _spawn(self, dim_c: int, dim_p: int):
@@ -420,8 +442,8 @@ class Action(TorchVectorizedObject):
         for attr in (self.u_multiplier, self.u_range, self.u_noise):
             if isinstance(attr, List):
                 assert len(attr) == self.action_size, (
-                    f"Action attributes u_... must be either a float or a list of floats"
-                    f" (one per action) all with same length"
+                    "Action attributes u_... must be either a float or a list of floats"
+                    " (one per action) all with same length"
                 )
 
     @property
@@ -492,12 +514,22 @@ class Action(TorchVectorizedObject):
         )
 
     def _reset(self, env_index: typing.Optional[int]):
-        for attr in [self.u, self.c]:
+        for attr_name in ["u", "c"]:
+            attr = self.__getattribute__(attr_name)
             if attr is not None:
                 if env_index is None:
-                    attr[:] = 0.0
+                    self.__setattr__(attr_name, torch.zeros_like(attr))
                 else:
-                    attr[env_index] = 0.0
+                    self.__setattr__(
+                        attr_name,
+                        TorchUtils.where_from_index(env_index, 0, attr),
+                    )
+
+    def zero_grad(self):
+        for attr_name in ["u", "c"]:
+            attr = self.__getattribute__(attr_name)
+            if attr is not None:
+                self.__setattr__(attr_name, attr.detach())
 
 
 # properties and state of physical world entity
@@ -510,7 +542,7 @@ class Entity(TorchVectorizedObject, Observable, ABC):
         collide: bool = True,
         density: float = 25.0,  # Unused for now
         mass: float = 1.0,
-        shape: Shape = Sphere(),
+        shape: Shape = None,
         v_range: float = None,
         max_speed: float = None,
         color=Color.GRAY,
@@ -521,6 +553,9 @@ class Entity(TorchVectorizedObject, Observable, ABC):
         gravity: typing.Union[float, Tensor] = None,
         collision_filter: Callable[[Entity], bool] = lambda _: True,
     ):
+        if shape is None:
+            shape = Sphere()
+
         TorchVectorizedObject.__init__(self)
         Observable.__init__(self)
         # name
@@ -690,6 +725,9 @@ class Entity(TorchVectorizedObject, Observable, ABC):
     def _reset(self, env_index: int):
         self.state._reset(env_index)
 
+    def zero_grad(self):
+        self.state.zero_grad()
+
     def set_pos(self, pos: Tensor, batch_index: int):
         self._set_state_property(EntityState.pos, self.state, pos, batch_index)
 
@@ -750,7 +788,7 @@ class Landmark(Entity):
     def __init__(
         self,
         name: str,
-        shape: Shape = Sphere(),
+        shape: Shape = None,
         movable: bool = False,
         rotatable: bool = False,
         collide: bool = True,
@@ -791,7 +829,7 @@ class Agent(Entity):
     def __init__(
         self,
         name: str,
-        shape: Shape = Sphere(),
+        shape: Shape = None,
         movable: bool = True,
         rotatable: bool = True,
         collide: bool = True,
@@ -988,6 +1026,11 @@ class Agent(Entity):
         self.dynamics.reset(env_index)
         super()._reset(env_index)
 
+    def zero_grad(self):
+        self.action.zero_grad()
+        self.dynamics.zero_grad()
+        super().zero_grad()
+
     @override(Entity)
     def to(self, device: torch.device):
         super().to(device)
@@ -1111,6 +1154,10 @@ class World(TorchVectorizedObject):
     def reset(self, env_index: int):
         for e in self.entities:
             e._reset(env_index)
+
+    def zero_grad(self):
+        for e in self.entities:
+            e.zero_grad()
 
     @property
     def agents(self) -> List[Agent]:
@@ -1327,7 +1374,7 @@ class World(TorchVectorizedObject):
             elif isinstance(e.shape, Line):
                 d = self._cast_ray_to_line(e, pos, angles, max_range)
             else:
-                assert False, f"Shape {e.shape} currently not handled by cast_ray"
+                raise RuntimeError(f"Shape {e.shape} currently not handled by cast_ray")
             dists.append(d)
         dist, _ = torch.min(torch.stack(dists, dim=-1), dim=-1)
         return dist
@@ -1353,12 +1400,15 @@ class World(TorchVectorizedObject):
             return_value = distance - LINE_MIN_DIST
         elif isinstance(entity.shape, Line):
             closest_point = _get_closest_point_line(
-                entity.state.pos, entity.state.rot, entity.shape.length, test_point_pos
+                entity.state.pos,
+                entity.state.rot,
+                entity.shape.length,
+                test_point_pos,
             )
             distance = torch.linalg.vector_norm(test_point_pos - closest_point, dim=-1)
             return_value = distance - LINE_MIN_DIST
         else:
-            assert False, "Distance not computable for given entity"
+            raise RuntimeError("Distance not computable for given entity")
         if env_index is not None:
             return_value = return_value[env_index]
         return return_value
@@ -1445,7 +1495,7 @@ class World(TorchVectorizedObject):
             dist = torch.linalg.vector_norm(point_a - point_b, dim=-1)
             return_value = dist - LINE_MIN_DIST
         else:
-            assert False, "Distance not computable for given entities"
+            raise RuntimeError("Distance not computable for given entities")
         return return_value
 
     def is_overlapping(self, entity_a: Entity, entity_b: Entity, env_index: int = None):
@@ -1507,7 +1557,7 @@ class World(TorchVectorizedObject):
                 distance_sphere_closest_point < dist_min
             )
         else:
-            assert False, "Overlap not computable for give entities"
+            raise RuntimeError("Overlap not computable for give entities")
         if env_index is not None:
             return_value = return_value[env_index]
         return return_value
@@ -1536,7 +1586,7 @@ class World(TorchVectorizedObject):
                 for e in self.entities
             }
 
-            for i, entity in enumerate(self.entities):
+            for entity in self.entities:
                 if isinstance(entity, Agent):
                     # apply agent force controls
                     self._apply_action_force(entity)
@@ -1551,7 +1601,7 @@ class World(TorchVectorizedObject):
 
             self._apply_vectorized_enviornment_force()
 
-            for i, entity in enumerate(self.entities):
+            for entity in self.entities:
                 # integrate physical state
                 self._integrate_state(entity, substep)
 
@@ -1717,7 +1767,7 @@ class World(TorchVectorizedObject):
                 ):
                     b_b.append((entity_a, entity_b))
                 else:
-                    assert False
+                    raise AssertionError()
         # Joints
         self._vectorized_joint_constraints(joints)
 
@@ -1777,7 +1827,7 @@ class World(TorchVectorizedObject):
             )
             rotate = rotate_prior.unsqueeze(0).expand(self.batch_dim, -1).unsqueeze(-1)
 
-            force_a_attractive, force_b_attractive = self._get_constraint_forces(
+            (force_a_attractive, force_b_attractive,) = self._get_constraint_forces(
                 pos_joint_a,
                 pos_joint_b,
                 dist_min=dist,
@@ -1868,12 +1918,12 @@ class World(TorchVectorizedObject):
             rot_l = []
             radius_s = []
             length_l = []
-            for l, s in l_s:
-                pos_l.append(l.state.pos)
-                pos_s.append(s.state.pos)
-                rot_l.append(l.state.rot)
-                radius_s.append(torch.tensor(s.shape.radius, device=self.device))
-                length_l.append(torch.tensor(l.shape.length, device=self.device))
+            for line, sphere in l_s:
+                pos_l.append(line.state.pos)
+                pos_s.append(sphere.state.pos)
+                rot_l.append(line.state.rot)
+                radius_s.append(torch.tensor(sphere.shape.radius, device=self.device))
+                length_l.append(torch.tensor(line.shape.length, device=self.device))
             pos_l = torch.stack(pos_l, dim=-2)
             pos_s = torch.stack(pos_s, dim=-2)
             rot_l = torch.stack(rot_l, dim=-2)
@@ -2384,12 +2434,16 @@ class World(TorchVectorizedObject):
             new_pos = entity.state.pos + entity.state.vel * self._sub_dt
             entity.state.pos = torch.stack(
                 [
-                    new_pos[..., X].clamp(-self._x_semidim, self._x_semidim)
-                    if self._x_semidim is not None
-                    else new_pos[..., X],
-                    new_pos[..., Y].clamp(-self._y_semidim, self._y_semidim)
-                    if self._y_semidim is not None
-                    else new_pos[..., Y],
+                    (
+                        new_pos[..., X].clamp(-self._x_semidim, self._x_semidim)
+                        if self._x_semidim is not None
+                        else new_pos[..., X]
+                    ),
+                    (
+                        new_pos[..., Y].clamp(-self._y_semidim, self._y_semidim)
+                        if self._y_semidim is not None
+                        else new_pos[..., Y]
+                    ),
                 ],
                 dim=-1,
             )

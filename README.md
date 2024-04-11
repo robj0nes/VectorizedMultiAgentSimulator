@@ -1,9 +1,13 @@
 # VectorizedMultiAgentSimulator (VMAS)
 <a href="https://pypi.org/project/vmas"><img src="https://img.shields.io/pypi/v/vmas" alt="pypi version"></a>
 [![Downloads](https://static.pepy.tech/personalized-badge/vmas?period=total&units=international_system&left_color=grey&right_color=blue&left_text=Downloads)](https://pepy.tech/project/vmas)
-![tests](https://github.com/proroklab/VectorizedMultiAgentSimulator/actions/workflows/python-app.yml/badge.svg)
+![tests](https://github.com/proroklab/VectorizedMultiAgentSimulator/actions/workflows/tests-linux.yml/badge.svg)
+[![codecov](https://codecov.io/github/proroklab/VectorizedMultiAgentSimulator/coverage.svg?branch=main)](https://codecov.io/gh/proroklab/VectorizedMultiAgentSimulator)
+[![Documentation Status](https://readthedocs.org/projects/vmas/badge/?version=latest)](https://vmas.readthedocs.io/en/latest/?badge=latest)
 [![Python](https://img.shields.io/badge/python-3.8%20%7C%203.9%20%7C%203.10-blue.svg)](https://www.python.org/downloads/)
 [![GitHub license](https://img.shields.io/badge/license-GPLv3.0-blue.svg)](https://github.com/proroklab/VectorizedMultiAgentSimulator/blob/main/LICENSE)
+[![arXiv](https://img.shields.io/badge/arXiv-2207.03530-b31b1b.svg)](https://arxiv.org/abs/2207.03530)
+
 
 <p align="center">
 <img src="https://github.com/matteobettini/vmas-media/blob/main/media/VMAS_scenarios.gif?raw=true" alt="drawing"/>  
@@ -117,8 +121,8 @@ pip install torchrl
 # Logging
 pip installl wandb 
 
-# Save renders
-pip install opencv-python moviepy
+# Rendering
+pip install opencv-python moviepy matplotlib
 
 # Tests
 pip install pytest pyyaml pytest-instafail tqdm
@@ -164,7 +168,7 @@ Check out how simple it is to use VMAS in [BenchMARL](https://github.com/faceboo
 We provide a [notebook](https://pytorch.org/rl/tutorials/multiagent_ppo.html) which guides you through a full
 multi-agent reinforcement learning pipeline for training VMAS scenarios in TorchRL using MAPPO/IPPO.
 
-You can find **example scripts** in the TorchRL repo [here](https://github.com/pytorch/rl/tree/main/examples/multiagent)
+You can find **example scripts** in the TorchRL repo [here](https://github.com/pytorch/rl/tree/main/sota-implementations/multiagent)
 on how to run MAPPO-IPPO-MADDPG-QMIX-VDN using the [VMAS wrapper](https://github.com/pytorch/rl/blob/main/torchrl/envs/libs/vmas.py).
 
 
@@ -246,7 +250,7 @@ customizable. Examples are: drag, friction, gravity, simulation timestep, non-di
 - **Agent actions**: Agents' physical actions are 2D forces for holonomic motion. Agent rotation can also be controlled through a torque action (activated by setting `agent.action.u_rot_range` at agent creation time). Agents can also be equipped with continuous or discrete communication actions.
 - **Action preprocessing**: By implementing the `process_action` function of a scenario, you can modify the agents' actions before they are passed to the simulator. This is used in `controllers` (where we provide different types of controllers to use) and `dynamics` (where we provide custom robot dynamic models).
 - **Controllers**: Controllers are components that can be appended to the neural network policy or replace it completely.  We provide a `VelocityController` which can be used to treat input actions as velocities (instead of default vmas input forces). This PID controller takes velocities and outputs the forces which are fed to the simulator. See the `vel_control` debug scenario for an example.
-- **Dynamic models**: VMAS simulates holonomic dynamics models by default. Custom dynamics can be chosen at agent creation time. Implementations now include `DiffDriveDynamics` for differential drive robots and `KinematicBicycleDynamics` for kinematic bicycle model. See `diff_drive` and `kinematic_bicycle` debug scenarios for examples.
+- **Dynamic models**: VMAS simulates holonomic dynamics models by default. Custom dynamics can be chosen at agent creation time. Implementations now include `DiffDriveDynamics` for differential drive robots, `KinematicBicycleDynamics` for kinematic bicycle model, and `Drone` for quadcopter dynamics. See `diff_drive`, `kinematic_bicycle` and `drone` debug scenarios for examples.
 - **Differentiable**: By setting `grad_enabled=True` when creating an environment, the simulator will be differentiable, allowing gradients flowing through any of its function.
 
 ## Creating a new scenario
@@ -380,6 +384,7 @@ To create a fake screen you need to have `Xvfb` installed.
 | `circle_trajectory.py` | One agent is rewarded to move in a circle trajectory at the `desired_radius`.                                                                                                                                                                                                                                                                                                           | <img src="https://github.com/matteobettini/vmas-media/blob/main/media/scenarios/circle_trajectory.gif?raw=true" alt="drawing" width="300"/> |
 | `diff_drive.py`        | An example of the `diff_drive` dynamic model constraint. Both agents have rotational actions which can be controlled interactively.  The first agent has differential drive dynamics. The second agent has standard vmas holonomic dynamics.                                                                                                                                            | <img src="https://github.com/matteobettini/vmas-media/blob/main/media/scenarios/diff_drive.gif?raw=true" alt="drawing" width="300"/>        |
 | `kinematic_bicycle.py` | An example of `kinematic_bicycle` dynamic model constraint. Both agents have rotational actions which can be controlled interactively.  The first agent has kinematic bicycle model dynamics. The second agent has standard vmas holonomic dynamics.                                                                                                                                    | <img src="https://github.com/matteobettini/vmas-media/blob/main/media/scenarios/kinematic_bicycle.gif?raw=true" alt="drawing" width="300"/> |
+| `drone.py`             | An example of the `drone` dynamic model.                                                                                                                                                                                                                                                                                                                                                | <img src="https://github.com/matteobettini/vmas-media/blob/main/media/scenarios/drone.gif?raw=true" alt="drawing" width="300"/>             |
 
 ### [MPE](https://github.com/openai/multiagent-particle-envs)
 
@@ -405,10 +410,10 @@ To create a fake screen you need to have `Xvfb` installed.
 ## TODOS
 
 - [ ] Reset any number of dimensions
-- [ ] Improve test efficiency and add new tests
 - [ ] Implement 1D camera sensor
 - [ ] Implement 2D birds eye view camera sensor
-- [ ] Implement 2D drone dynamics
+- [X] Improve test efficiency and add new tests
+- [X] Implement 2D drone dynamics
 - [X] Allow any number of actions
 - [X] Improve VMAS performance
 - [X] Dict obs support in torchrl
