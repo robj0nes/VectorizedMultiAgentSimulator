@@ -24,6 +24,7 @@ def get_distinct_color_list(n_cols, device: torch.device, exclusions=None):
 class Scenario(BaseScenario):
     def __init__(self):
         super().__init__()
+        self.observe_other_agents = None
         self.observe_all_goals = None
         self.rew = None
         self.goal_col_obs = None
@@ -40,6 +41,7 @@ class Scenario(BaseScenario):
 
         self.n_goals = kwargs.get("n_goals", 4)
         self.observe_all_goals = kwargs.get("observe_all_goals", False)
+        self.observe_other_agents = kwargs.get("observe_other_agents", True)
 
         self.arena_size = 5
         self.viewer_zoom = 1.7
@@ -79,8 +81,8 @@ class Scenario(BaseScenario):
 
         world.spawn_map()
 
-        self.agent_collision_penalty = kwargs.get("agent_collision_penalty", -0.5)
-        self.wall_collision_penalty = kwargs.get("passage_collision_penalty", -0.5)
+        self.agent_collision_penalty = kwargs.get("agent_collision_penalty", -0.2)
+        self.wall_collision_penalty = kwargs.get("passage_collision_penalty", -0.2)
         self.pos_shaping = kwargs.get("pos_shaping", False)
         self.pos_shaping_factor = kwargs.get("position_shaping_factor", 1.0)
         self.final_reward = kwargs.get("final_reward", 0.01)
@@ -151,7 +153,7 @@ class Scenario(BaseScenario):
         self.world.reset_map(env_index)
 
     def observation(self, agent: DOTSAgent) -> AGENT_OBS_TYPE:
-        # TODO: Test if adding this reduces collisions/improves training..
+        # TODO: Test if adding this reduces collisions/improves training.. first try suggests not.
         # Get vector norm distance to all other agents.
         other_agents = torch.transpose(
             torch.stack(
@@ -159,7 +161,8 @@ class Scenario(BaseScenario):
                     torch.linalg.vector_norm((agent.state.pos - a.state.pos), dim=1)
                     for a in self.world.agents if a != agent
                 ]
-            ), 0, 1)
+            ), 0, 1
+        ) if self.observe_other_agents else torch.empty(0)
 
         # Forms a list of tensors [distX, distY, R, G, B] for each goal. TODO: Seems too hard to learn..?
         #   Shape [Batch size, n_goals * (2 + payload_dims)]
