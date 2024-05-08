@@ -19,7 +19,6 @@ from vmas.simulator.utils import (
     DEVICE_TYPING,
     override,
     TorchUtils,
-    VIEWER_MIN_ZOOM,
     X,
     Y,
 )
@@ -354,7 +353,7 @@ class Environment(TorchVectorizedObject):
             return spaces.Box(
                 low=-np.float32("inf"),
                 high=np.float32("inf"),
-                shape=(len(obs[0]),),
+                shape=obs.shape[1:],
                 dtype=np.float32,
             )
         elif isinstance(obs, Dict):
@@ -668,7 +667,9 @@ class Environment(TorchVectorizedObject):
 
             self._init_rendering()
 
-        zoom = max(VIEWER_MIN_ZOOM, self.scenario.viewer_zoom)
+        if self.scenario.viewer_zoom <= 0:
+            raise ValueError("Scenario viewer zoom must be > 0")
+        zoom = self.scenario.viewer_zoom
 
         if aspect_ratio < 1:
             cam_range = torch.tensor([zoom, zoom / aspect_ratio], device=self.device)
@@ -685,13 +686,17 @@ class Environment(TorchVectorizedObject):
                 [agent.shape.circumscribed_radius() for agent in self.world.agents]
             )
             viewer_size_fit = (
-                    torch.stack(
-                        [
-                            torch.max(torch.abs(all_poses[:, X])),
-                            torch.max(torch.abs(all_poses[:, Y])),
-                        ]
-                    )
-                    + 2 * max_agent_radius
+                torch.stack(
+                    [
+                        torch.max(
+                            torch.abs(all_poses[:, X] - self.scenario.render_origin[X])
+                        ),
+                        torch.max(
+                            torch.abs(all_poses[:, Y] - self.scenario.render_origin[Y])
+                        ),
+                    ]
+                )
+                + 2 * max_agent_radius
             )
 
             viewer_size = torch.maximum(
@@ -701,10 +706,10 @@ class Environment(TorchVectorizedObject):
             cam_range *= torch.max(viewer_size)
 
             self.viewer.set_bounds(
-                -cam_range[X],
-                cam_range[X],
-                -cam_range[Y],
-                cam_range[Y],
+                -cam_range[X] + self.scenario.render_origin[X],
+                cam_range[X] + self.scenario.render_origin[X],
+                -cam_range[Y] + self.scenario.render_origin[Y],
+                cam_range[Y] + self.scenario.render_origin[Y],
             )
         else:
             # update bounds to center around agent
