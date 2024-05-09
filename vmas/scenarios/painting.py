@@ -274,6 +274,16 @@ class Scenario(BaseScenario):
                 for goal in self.goals if torch.any(torch.eq(goal.state.expected_payload, mixed_payload))
             ]
 
+            # Question: Must return the same size observations each time,
+            #  if no goals found set dist to inf - is this sensible...?
+            if len(goals) == 0:
+                goals = [torch.stack(
+                    [
+                        torch.tensor([torch.inf, torch.inf], dtype=torch.float32)
+                        for _ in range(self.world.batch_dim)
+                    ]
+                )]
+
         return torch.cat(
             ([
                  agent.state.pos,
