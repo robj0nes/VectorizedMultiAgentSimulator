@@ -101,13 +101,18 @@ class InteractiveEnv:
                 self.reset = False
                 total_rew = [0] * self.n_agents
 
-            action_list = [[0.0] * agent.action_size for agent in self.agents]
-            action_list[self.current_agent_index] = self.u[
-                : self.agents[self.current_agent_index].action_size
+            # TODO: Updated this as comms weren't included in original implementation
+            dim_c = self.env.env.world.dim_c if self.env.env.world.dim_c is not None else 0
+            action_list = [
+                [0.0] * (agent.action_size + dim_c) for agent in self.agents
+            ]
+
+            action_list[self.current_agent_index][:self.agents[self.current_agent_index].action_size] = self.u[
+                    : self.agents[self.current_agent_index].action_size
             ]
 
             if self.n_agents > 1 and self.control_two_agents:
-                action_list[self.current_agent_index2] = self.u2[
+                action_list[self.current_agent_index2][:self.agents[self.current_agent_index].action_size] = self.u2[
                     : self.agents[self.current_agent_index2].action_size
                 ]
             obs, rew, done, info = self.env.step(action_list)

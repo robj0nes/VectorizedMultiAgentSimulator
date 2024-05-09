@@ -1,4 +1,8 @@
+import math
 import random
+from enum import Enum
+
+import numpy as np
 import torch
 import seaborn as sns
 
@@ -21,6 +25,16 @@ def get_distinct_color_list(n_cols, device: torch.device, exclusions=None):
                         random.sample(range(0, len(opts)), n_cols)])
 
 
+class TaskType(Enum):
+    NAV = 0
+    MIX = 1
+    FULL = 2
+
+    @classmethod
+    def has_value(cls, value):
+        return value in cls._value2member_map_
+
+
 class Scenario(BaseScenario):
     def __init__(self):
         super().__init__()
@@ -34,20 +48,26 @@ class Scenario(BaseScenario):
         self.n_agents = None
         self.goals = None
         self.agents_on_goal = None
+        self.task_complexity = None
+        self.communication_size = None
 
     def make_world(self, batch_dim: int, device: torch.device, **kwargs) -> World:
         self.n_agents = kwargs.get("n_agents", 4)
         self.agent_radius = 0.2
+        self.payload_shape = (2, 3)
 
         self.n_goals = kwargs.get("n_goals", 4)
         self.observe_all_goals = kwargs.get("observe_all_goals", False)
         self.observe_other_agents = kwargs.get("observe_other_agents", True)
+        self.communication_size = kwargs.get("communication_size", 0)
+
+        self.task_complexity = kwargs.get("complexity", "nav")
 
         self.arena_size = 5
         self.viewer_zoom = 1.7
 
-        # Question: How to effectively use dim_c and not have faults with action_size.
-        world = DOTSWorld(batch_dim, device, collision_force=100, dim_c=4)
+        # dim_c is the size of the communications signal.
+        world = DOTSWorld(batch_dim, device, collision_force=100, dim_c=self.communication_size)
         # world = DOTSWorld(batch_dim, device, collision_force=100)
 
         for i in range(self.n_agents):
@@ -56,10 +76,11 @@ class Scenario(BaseScenario):
                 shape=Sphere(self.agent_radius),
                 u_multiplier=0.7,
                 color=Color.GREEN,
-                payload_shape=3,
+                payload_shape=self.payload_shape,
                 # Question: What does silent=False (ie. allowing comms) specifically do?
-                silent=False,
-                # action_size=6
+                silent=True if self.communication_size == 0 else False,
+                # TODO: Make action size > 2 for mixing operations.
+                # action_size=3
             )
             world.add_agent(agent)
             agent.agent_collision_rew = torch.zeros(batch_dim, device=device)
@@ -92,19 +113,82 @@ class Scenario(BaseScenario):
         self.final_rew = self.pos_rew.clone()
         return world
 
+    def premix_paints(self, small, large, device):
+        large_payloads = torch.stack(
+            [
+                get_distinct_color_list(large, device) for _ in range(self.world.batch_dim)
+            ]
+        )
+
+        ran_ints = [
+            random.sample(range(large_payloads.shape[1]), small) for _ in range(self.world.batch_dim)
+        ]
+
+        small_payloads = torch.stack(
+            [
+                torch.stack(
+                    [
+                        large_payloads[j][i] for i in ran_ints[j]
+                    ]
+                )
+                for j in range(self.world.batch_dim)
+            ]
+        )
+
+        for i in range(self.world.batch_dim):
+            for sp in small_payloads[i]:
+                assert (
+                        sp in large_payloads[i]
+                ), "Trying to assign matching payloads to goals, but found a mismatch"
+
+        return small_payloads, large_payloads
+
+    def unmixed_paints(self, device):
+        t = np.linspace(-510, 510, self.n_agents)
+        # Generate a linear distribution across RGB colour space
+        agent_payloads = torch.stack(
+            [
+                torch.tensor(
+                    np.round(
+                        np.clip(
+                            np.stack(
+
+                                [-t, 510 - np.abs(t), t],
+                                axis=1
+                            ),
+                            0,
+                            255
+                        ).astype(np.uint8)
+                    ),
+                    device=device)
+                for _ in range(self.world.batch_dim)
+            ]
+        )
+
+        # Generate a random colour in RGB colour space for the goals.
+        goal_payloads = torch.stack(
+            [
+                torch.stack([
+                    torch.tensor(random.sample(range(256), 3), device=device, dtype=torch.uint8)
+                    for _ in range(self.n_goals)
+                ])
+                for _ in range(self.world.batch_dim)
+            ]
+        )
+
+        return agent_payloads, goal_payloads
+
     def random_paint_generator(self, device: torch.device):
-        # TODO: Remove eventually - For trivial test problem: setting goals equal to random agent payload (no paint
-        #  mixing required)
-        if self.n_goals <= self.n_agents:
-            agent_payloads = get_distinct_color_list(self.n_agents, device)
-            ran_ints = random.sample(range(len(agent_payloads)), self.n_goals)
-            goal_payloads = torch.stack([agent_payloads[i] for i in ran_ints])
+        if self.task_complexity == 'nav':
+            if self.n_goals <= self.n_agents:
+                goal_payloads, agent_payloads = self.premix_paints(self.n_goals, self.n_agents, device)
+            else:
+                agent_payloads, goal_payloads = self.premix_paints(self.n_agents, self.n_goals, device)
 
+            # test = goal_payloads.unsqueeze(0).expand(self.world.batch_dim, self.n_goals, 3)
+            # goal_payloads = goal_payloads.unsqueeze(0).repeat(self.world.batch_dim, 1)
         else:
-            goal_payloads = get_distinct_color_list(self.n_goals, device)
-            ran_ints = random.sample(range(len(goal_payloads)), self.n_agents)
-            agent_payloads = torch.stack([goal_payloads[i] for i in ran_ints])
-
+            agent_payloads, goal_payloads = self.unmixed_paints(device)
         # TODO: Full problem: create a set of n_goals from a mix of RGB agent payloads.
         return agent_payloads, goal_payloads
 
@@ -121,12 +205,13 @@ class Scenario(BaseScenario):
         agent_payload, goal_payload = self.random_paint_generator(self.world.device)
 
         for i, agent in enumerate(self.world.agents):
-            payload = agent_payload[i].unsqueeze(0).repeat(self.world.batch_dim, 1)
+            # Form a payload of shape [Batch_dim, RGB source, RGB mixed] default mixed to source value.
+            payload = agent_payload[:, i, :].unsqueeze(1).repeat(1, 2, 1)
             agent.set_payload(payload, batch_index=env_index)
 
         for i, goal in enumerate(self.goals):
-            expected_payload = goal_payload[i].unsqueeze(0).repeat(self.world.batch_dim, 1)
-            goal.set_expected_payload(expected_payload, batch_index=env_index)
+            # Goal should be of shape: [Batch dim, RGB]
+            goal.set_expected_payload(goal_payload[:, i, :], batch_index=env_index)
 
         # Preliminary position shaping to all goals. Clone distances to use as normalisation during reward computation.
         for agent in self.world.agents:
@@ -178,6 +263,7 @@ class Scenario(BaseScenario):
             ]
 
         else:
+            mixed_payload = agent.state.payload[:, 1, :]
             # Restrict observations to just the correctly coloured goal.
             goals = [
                 torch.cat(
@@ -185,14 +271,14 @@ class Scenario(BaseScenario):
                         goal.state.pos - agent.state.pos
                     ],
                     dim=-1)
-                for goal in self.goals if torch.any(torch.eq(goal.state.expected_payload, agent.state.payload))
+                for goal in self.goals if torch.any(torch.eq(goal.state.expected_payload, mixed_payload))
             ]
 
         return torch.cat(
             ([
                  agent.state.pos,
                  agent.state.vel,
-                 agent.state.payload
+                 torch.reshape(agent.state.payload, (self.world.batch_dim, -1))
              ]
              + [*goals]
              + [other_agents]),
@@ -206,10 +292,10 @@ class Scenario(BaseScenario):
         agent.agent_pos_reward[:] = 0
         agent.agent_final_reward[:] = 0
 
-        # Collects a tensor of goals with the same colour as the payload.
+        # Collects a tensor of goals with the same colour as the mixed payload.
         color_match = torch.stack(
             [(torch.floor(
-                torch.sum(torch.eq(agent.state.payload, goal.state.expected_payload),
+                torch.sum(torch.eq(agent.state.payload[:, 1, :], goal.state.expected_payload),
                           dim=-1) / 3))
                 for goal in self.goals])
 
@@ -303,16 +389,27 @@ class Scenario(BaseScenario):
                 geoms.append(payload)
 
         for agent in self.world.agents:
-            payload = rendering.make_circle(radius=self.agent_radius / 2)
+            primary_payload = rendering.make_circle(proportion=0.5, radius=self.agent_radius / 2)
+            mixed_payload = rendering.make_circle(proportion=0.5, radius=self.agent_radius / 2)
+            primary_col = agent.state.payload[env_index][0].reshape(-1)
+            mixed_col = agent.state.payload[env_index][1].reshape(-1)
 
-            col = agent.state.payload[env_index].reshape(-1)
-            payload.set_color(*col)
+            primary_payload.set_color(*primary_col)
+            mixed_payload.set_color(*mixed_col)
 
-            xform = rendering.Transform()
-            payload.add_attr(xform)
+            p_xform = rendering.Transform()
+            primary_payload.add_attr(p_xform)
 
-            xform.set_translation(agent.state.pos[env_index][X], agent.state.pos[env_index][Y])
-            geoms.append(payload)
+            m_xform = rendering.Transform()
+            mixed_payload.add_attr(m_xform)
+
+            p_xform.set_translation(agent.state.pos[env_index][X], agent.state.pos[env_index][Y])
+            p_xform.set_rotation(-math.pi / 2)
+            m_xform.set_translation(agent.state.pos[env_index][X], agent.state.pos[env_index][Y])
+            m_xform.set_rotation(math.pi / 2)
+
+            geoms.append(primary_payload)
+            geoms.append(mixed_payload)
 
             # TODO: Add agent labels?
 
@@ -325,4 +422,5 @@ if __name__ == '__main__':
         n_agents=3,
         n_goals=3,
         pos_shaping=True,
+        communication_size=2
     )

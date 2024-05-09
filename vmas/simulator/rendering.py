@@ -520,10 +520,10 @@ def render_function_util(
     return geom
 
 
-def make_circle(radius=10, res=30, filled=True):
+def make_circle(radius=10, res=30, filled=True, proportion=1):
     points = []
     for i in range(res):
-        ang = 2 * math.pi * i / res
+        ang = proportion * 2 * math.pi * i / res
         points.append((math.cos(ang) * radius, math.sin(ang) * radius))
     if filled:
         return FilledPolygon(points)

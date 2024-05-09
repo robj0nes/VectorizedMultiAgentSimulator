@@ -78,7 +78,7 @@ class DOTSAgentState(AgentState):
         # Has agent completed primary task and is now seeking goal.
         self._seeking_goal = None
 
-        # Defines the agent payload
+        # Defines the agent payload(s)
         self._payload = None
 
     @property
@@ -102,6 +102,7 @@ class DOTSAgentState(AgentState):
 
     @payload.setter
     def payload(self, payload: Tensor):
+        print()
         assert (
                 self._batch_dim is not None and self._device is not None
         ), "First add an entity to the world before setting"
@@ -134,9 +135,10 @@ class DOTSAgentState(AgentState):
         )
         if self.payload_shape is not None:
             self.payload = torch.zeros(
-                self.batch_dim, self.payload_shape, device=self.device, dtype=torch.float32
+                self.batch_dim, *self.payload_shape, device=self.device, dtype=torch.float32
             )
         super()._spawn(dim_c, dim_p)
+
 
 class DOTSPayloadDest(Landmark):
     def __init__(self, expected_payload_shape=None, **kwargs):
@@ -184,6 +186,3 @@ class DOTSPayloadDestState(EntityState):
                 self.batch_dim, self.expected_payload_shape, device=self.device, dtype=torch.float32
             )
         super()._spawn(dim_c, dim_p)
-
-
-
