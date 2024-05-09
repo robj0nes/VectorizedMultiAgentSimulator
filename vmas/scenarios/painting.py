@@ -47,8 +47,8 @@ class Scenario(BaseScenario):
         self.viewer_zoom = 1.7
 
         # Question: How to effectively use dim_c and not have faults with action_size.
-        # world = DOTSWorld(batch_dim, device, collision_force=100, dim_c=4)
-        world = DOTSWorld(batch_dim, device, collision_force=100)
+        world = DOTSWorld(batch_dim, device, collision_force=100, dim_c=4)
+        # world = DOTSWorld(batch_dim, device, collision_force=100)
 
         for i in range(self.n_agents):
             agent = DOTSAgent(
@@ -58,7 +58,7 @@ class Scenario(BaseScenario):
                 color=Color.GREEN,
                 payload_shape=3,
                 # Question: What does silent=False (ie. allowing comms) specifically do?
-                # silent=False,
+                silent=False,
                 # action_size=6
             )
             world.add_agent(agent)
@@ -279,6 +279,11 @@ class Scenario(BaseScenario):
         # TODO: Return a dictionary of reward signals to provide debugging/logging info..
         #  At the moment this is only storing the last agents calculations.
         return {"reward": self.pos_rew + self.final_rew}
+
+    def process_action(self, agent: DOTSAgent):
+        # TODO: Implement action processing logic to happen before simulation step.
+        #  Utilise agent.action where u = physical action and c = comms action.
+        pass
 
     def top_layer_render(self, env_index: int = 0):
         from vmas.simulator import rendering
