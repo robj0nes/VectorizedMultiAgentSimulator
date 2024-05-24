@@ -37,12 +37,12 @@ class InteractiveEnv:
     """
 
     def __init__(
-        self,
-        env: GymWrapper,
-        control_two_agents: bool = False,
-        display_info: bool = True,
-        save_render: bool = False,
-        render_name: str = "interactive",
+            self,
+            env: GymWrapper,
+            control_two_agents: bool = False,
+            display_info: bool = True,
+            save_render: bool = False,
+            render_name: str = "interactive",
     ):
         self.env = env
         self.control_two_agents = control_two_agents
@@ -61,6 +61,9 @@ class InteractiveEnv:
         )  # up, down, left, right, rot+, rot-
         self.u = [0] * (3 if self.continuous else 2)
         self.u2 = [0] * (3 if self.continuous else 2)
+
+        self.c = np.array([[0.0] * self.env.env.world.dim_c] * self.n_agents)
+
         self.frame_list = []
         self.display_info = display_info
         self.save_render = save_render
@@ -68,7 +71,7 @@ class InteractiveEnv:
 
         if self.control_two_agents:
             assert (
-                self.n_agents >= 2
+                    self.n_agents >= 2
             ), "Control_two_agents is true but not enough agents in scenario"
 
         self.text_lines = []
@@ -101,20 +104,28 @@ class InteractiveEnv:
                 self.reset = False
                 total_rew = [0] * self.n_agents
 
-            # TODO: Updated this as comms weren't included in original implementation
-            dim_c = self.env.env.world.dim_c if self.env.env.world.dim_c is not None else 0
+            # Note: Updated this as coms weren't included as part of action in original implementation
+            # dim_c = self.env.env.world.dim_c if self.env.env.world.dim_c is not None else 0
             action_list = [
-                [0.0] * (agent.action_size + dim_c) for agent in self.agents
+                [0.0] * agent.action_size for agent in self.agents
             ]
+            # Append current coms state to action list
+            for i in range(self.n_agents):
+                action_list[i] += self.c[i].tolist()
 
             action_list[self.current_agent_index][:self.agents[self.current_agent_index].action_size] = self.u[
-                    : self.agents[self.current_agent_index].action_size
-            ]
+                                                                                                        : self.agents[
+                                                                                                            self.current_agent_index].action_size
+                                                                                                        ]
+            action_list[self.current_agent_index][self.agents[self.current_agent_index].action_size:] = self.c[
+                self.current_agent_index]
 
             if self.n_agents > 1 and self.control_two_agents:
                 action_list[self.current_agent_index2][:self.agents[self.current_agent_index].action_size] = self.u2[
-                    : self.agents[self.current_agent_index2].action_size
-                ]
+                                                                                                             :
+                                                                                                             self.agents[
+                                                                                                                 self.current_agent_index2].action_size
+                                                                                                             ]
             obs, rew, done, info = self.env.step(action_list)
 
             if self.display_info:
@@ -125,7 +136,7 @@ class InteractiveEnv:
                 message = f"Obs: {obs_str[:len(obs_str) // 2]}"
                 self._write_values(1, message)
 
-                message = f"Rew: {round(rew[self.current_agent_index],3)}"
+                message = f"Rew: {round(rew[self.current_agent_index], 3)}"
                 self._write_values(2, message)
 
                 total_rew = list(map(add, total_rew, rew))
@@ -188,6 +199,19 @@ class InteractiveEnv:
                         self.current_agent_index = self._increment_selected_agent_index(
                             self.current_agent_index
                         )
+
+            elif k == key._0:
+                self.c[self.current_agent_index][0] += 0.1
+            elif k == key._1:
+                self.c[self.current_agent_index][1] += 0.1
+            elif k == key._2:
+                self.c[self.current_agent_index][2] += 0.1
+            elif k == key._3:
+                self.c[self.current_agent_index][3] += 0.1
+            elif k == key._4:
+                self.c[self.current_agent_index][4] += 0.1
+
+            self.c[self.c > 1] = 0
 
             if self.control_two_agents:
                 agent2_range = self.agents[
@@ -299,11 +323,11 @@ class InteractiveEnv:
 
 
 def render_interactively(
-    scenario: Union[str, BaseScenario],
-    control_two_agents: bool = False,
-    display_info: bool = True,
-    save_render: bool = False,
-    **kwargs,
+        scenario: Union[str, BaseScenario],
+        control_two_agents: bool = False,
+        display_info: bool = True,
+        save_render: bool = False,
+        **kwargs,
 ):
     """Executes a scenario and renders it so that you can debug and control agents interactively.
 

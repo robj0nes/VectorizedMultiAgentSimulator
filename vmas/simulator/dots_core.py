@@ -102,7 +102,6 @@ class DOTSAgentState(AgentState):
 
     @payload.setter
     def payload(self, payload: Tensor):
-        print()
         assert (
                 self._batch_dim is not None and self._device is not None
         ), "First add an entity to the world before setting"
@@ -131,7 +130,7 @@ class DOTSAgentState(AgentState):
     @override(AgentState)
     def _spawn(self, dim_c: int, dim_p: int):
         self.seeking_goal = torch.zeros(
-            self.batch_dim, 1, device=self.device, dtype=torch.bool
+            self.batch_dim, device=self.device, dtype=torch.bool
         )
         if self.payload_shape is not None:
             self.payload = torch.zeros(

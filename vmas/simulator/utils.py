@@ -44,6 +44,7 @@ DONE_TYPE = Tensor
 
 
 class Color(Enum):
+    YELLOW = (0.75, 0.75, 0.25)
     RED = (0.75, 0.25, 0.25)
     GREEN = (0.25, 0.75, 0.25)
     BLUE = (0.25, 0.25, 0.75)

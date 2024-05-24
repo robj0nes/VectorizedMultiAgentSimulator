@@ -558,7 +558,9 @@ class Environment(TorchVectorizedObject):
                 # Discrete to one-hot
                 agent.action.c.scatter_(1, comm_action, 1)
             else:
-                comm_action = action[:, action_index:]
+                # Why was comm_action being redefined here?
+                # Removing as breaks case where agent action size is > dim_p
+                # comm_action = action[:, action_index:]
                 assert not torch.any(comm_action > 1) and not torch.any(
                     comm_action < 0
                 ), "Comm actions are out of range [0,1]"

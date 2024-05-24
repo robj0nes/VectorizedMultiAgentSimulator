@@ -228,7 +228,7 @@ class Transform(Attr):
         glPushMatrix()
         glTranslatef(
             self.translation[0], self.translation[1], 0
-        )  # translate to GL loc ppint
+        )  # translate to GL loc point
         glRotatef(RAD2DEG * self.rotation, 0, 0, 1.0)
         glScalef(self.scale[0], self.scale[1], 1)
 
