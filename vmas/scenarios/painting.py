@@ -14,11 +14,12 @@ from vmas.simulator.scenario import BaseScenario
 from vmas.simulator.utils import AGENT_REWARD_TYPE, AGENT_OBS_TYPE, ScenarioUtils, Y, X, Color
 
 
-# Question:
-#   1. How can I define agent action space
-#   2. Rewards: Advice on how to form well structured reward signals...
-#   3. Extending the evaluation video length.
-#   4. Nan actions occurring sometimes?
+# TODO:
+#  1. Figure out how to solve the navigation issue.
+#   - Failure is most likely because it is too hard to learn when payloads
+#     and goals are not consistently indexed along the batch dim..
+#  2. Try to integrate coms and nav once above is solved.
+#  3. Later: Implementation assumes agent[i] and goal[i] are always connected. Does not necessarily generalise
 
 def get_distinct_color_list(n_cols, device: torch.device, exclusions=None):
     opts = sns.color_palette(palette="Set2")
@@ -108,8 +109,8 @@ class Scenario(BaseScenario):
 
         world.spawn_map()
 
-        self.agent_collision_penalty = kwargs.get("agent_collision_penalty", 0)
-        self.env_collision_penalty = kwargs.get("env_collision_penalty", 0)
+        self.agent_collision_penalty = kwargs.get("agent_collision_penalty", -0.2)
+        self.env_collision_penalty = kwargs.get("env_collision_penalty", -0.2)
         self.min_collision_distance = kwargs.get("collision_dist", 0.005)
 
         self.pos_shaping = kwargs.get("pos_shaping", False)
@@ -118,8 +119,8 @@ class Scenario(BaseScenario):
         self.mix_shaping = kwargs.get("mix_shaping", False)
         self.mix_shaping_factor = kwargs.get("mix_shaping_factor", 1.0)
 
-        self.all_on_goal = kwargs.get("final_pos_reward", 0.5)
-        self.all_mixed = kwargs.get("final_mix_reward", 0.5)
+        self.all_on_goal = kwargs.get("final_pos_reward", 0.01)
+        self.all_mixed = kwargs.get("final_mix_reward", 0.01)
 
         self.final_rew = torch.zeros(batch_dim, device=device, dtype=torch.float32)
         self.final_pos_rew = self.final_rew.clone()
@@ -137,11 +138,17 @@ class Scenario(BaseScenario):
             random.sample(range(large_payloads.shape[1]), small) for _ in range(self.world.batch_dim)
         ]
 
+        # TODO: Test nav with random agent-goal assignments. Make sure that observations are
+        #  based on colour match, not agent index.
         small_payloads = torch.stack(
             [
                 torch.stack(
                     [
-                        large_payloads[j][i] for i in ran_ints[j]
+                        # Random goal assignment
+                        # large_payloads[j][i] for i in ran_ints[j]
+
+                        # Indexed goal assignment
+                        large_payloads[j][i] for i in range(large_payloads.shape[1])
                     ]
                 )
                 for j in range(self.world.batch_dim)
@@ -203,8 +210,8 @@ class Scenario(BaseScenario):
             # test = goal_payloads.unsqueeze(0).expand(self.world.batch_dim, self.n_goals, 3)
             # goal_payloads = goal_payloads.unsqueeze(0).repeat(self.world.batch_dim, 1)
         else:
+            # TODO: Full problem: create a set of n_goals from a mix of RGB agent payloads.
             agent_payloads, goal_payloads = self.unmixed_paints(device)
-        # TODO: Full problem: create a set of n_goals from a mix of RGB agent payloads.
         return agent_payloads, goal_payloads
 
     def reset_agents(self, env_index):
@@ -287,7 +294,8 @@ class Scenario(BaseScenario):
         if self.task_type != "mix":
             # Collect vector norm distance to goals.
             goals = self.compute_goal_observations(agent)
-            task_obs.append(goals.reshape(goals.shape[-1], -1))
+            task_obs.append(goals)
+            # task_obs.append(goals.reshape(goals.shape[-1], -1))
 
         if self.task_type != "nav":
             if self.integrated_coms:
@@ -305,7 +313,8 @@ class Scenario(BaseScenario):
             ([
                  agent.state.pos,
                  agent.state.vel,
-                 torch.reshape(agent.state.payload, (self.world.batch_dim, -1))
+                 agent.state.payload[:, 1, :]
+                 # torch.reshape(agent.state.payload, (self.world.batch_dim, -1))
              ]
              + [*task_obs]
              + [other_agents]),
@@ -314,6 +323,8 @@ class Scenario(BaseScenario):
 
     # TODO: The full implementation for this will require some work as we need to define some variable
     #  observation of whether a payload-goal colour match has been made in a given batch dim.
+    #   - Perhaps best to always observe goal, but only receive positional rewards once colour match has been made.
+    #  ..
     def compute_goal_observations(self, agent):
         # Forms a list of tensors [distX, distY, R, G, B] for each goal. QUESTION: Seems too hard to learn..?
         #   Shape [Batch size, n_goals * (2 + payload_dims)]
@@ -331,7 +342,21 @@ class Scenario(BaseScenario):
 
         else:
             agent_index = int(agent.name.split('_')[1])
-            goals = torch.linalg.vector_norm((self.goals[agent_index].state.pos - agent.state.pos), dim=1)
+
+            # Goal obs is relative position only.
+            goals = torch.cat(
+                [
+                    self.goals[agent_index].state.pos - agent.state.pos
+                ],
+                dim=-1)
+
+            # TODO: Test navigation after introducing these additional observations.
+            # Goal obs is relative position and payload.
+            # goals = torch.cat(
+            #     [
+            #         self.goals[agent_index].state.pos - agent.state.pos, self.goals[agent_index].state.expected_payload
+            #     ],
+            #     dim=-1)
 
         return goals
 
@@ -345,26 +370,26 @@ class Scenario(BaseScenario):
 
         self.compute_collision_penalties(agent)
 
-        self.final_rew[:] = 0
+        # If we are the last agent, who computes global reward signals, reset final reward.
+        if agent == self.world.agents[-1]:
+            self.final_rew[:] = 0
 
         # If we are just training mixing, don't bother with navigation.
         if self.task_type != "mix":
             self.compute_positional_rewards(agent)
 
-            # TODO: Testing if per agent on-goal reward works
-            self.final_rew += agent.agent_final_reward
+            if agent == self.world.agents[-1]:
+                self.final_pos_rew[:] = 0
+                for a in self.world.agents:
+                    self.final_pos_rew += a.agent_final_reward
 
-            # TODO: ALT If all agents are on goal add a final reward.
-            # if agent == self.world.agents[-1]:
-            #     self.final_pos_rew[:] = 0
-            #     for a in self.world.agents:
-            #         self.final_pos_rew += a.agent_final_reward
-            #     # Zero any batch dim when one or more agents have not reached their goal.
-            #     self.final_pos_rew[self.final_pos_rew < self.all_on_goal] = 0
-            #     self.final_rew[self.final_pos_rew > 0] += self.all_on_goal
+                self.final_rew += self.final_pos_rew
 
-        # TODO: Try giving a one-time reward signal for all agents successfully mixing payloads,
-        #  rather than a cumulative one...
+                # Zero any batch dim when one or more agents have not reached their goal.
+                # self.final_pos_rew[self.final_pos_rew < self.all_on_goal] = 0
+                # self.final_rew[self.final_pos_rew > 0] += self.all_on_goal
+
+
         # If we are just training navigation, don't bother with mixing.
         if self.task_type != "nav":
             self.compute_mixing_rewards(agent)
@@ -394,9 +419,6 @@ class Scenario(BaseScenario):
         )
 
     def compute_positional_rewards(self, agent):
-        agent_index = int(agent.name.split('_')[1])
-        dists2 = torch.linalg.vector_norm((agent.state.pos - self.goals[agent_index].state.pos), dim=1)
-
         # Collects a tensor of goals with the same colour as the mixed payload.
         colour_match = torch.stack(
             [
@@ -408,14 +430,14 @@ class Scenario(BaseScenario):
         dists = torch.stack(
             [
                 torch.linalg.vector_norm((agent.state.pos - goal.state.pos), dim=1)
+                # - goal.shape.length / 2
                 for goal in self.goals
             ])
 
         if self.pos_shaping:
             # Perform position shaping on goal distances
             pos_shaping = dists * self.pos_shaping_factor
-            shaped_dists = (agent.shaping - pos_shaping)
-            # shaped_dists = (agent.shaping - pos_shaping) / agent.pos_shape_norm
+            shaped_dists = (agent.shaping - pos_shaping) / agent.pos_shape_norm
 
             agent.shaping = pos_shaping
 
@@ -424,11 +446,9 @@ class Scenario(BaseScenario):
 
         # Return true if agent with correct payload is on goal with same expected payload.
         matched_dists = torch.abs((dists * colour_match).sum(dim=0))
-        on_goal = torch.eq(0 < matched_dists, matched_dists < 2 * agent.shape.radius)
+        # on_goal = torch.eq(0 < matched_dists, matched_dists < 2 * agent.shape.radius)
+        on_goal = torch.eq(0 < matched_dists, matched_dists < agent.shape.radius / 2)
 
-        # TODO: Testing if this is useful..
-        # agent.agent_pos_reward[on_goal] += 0.001
-        # Save per agent final reward iff on_goal.
         agent.agent_final_reward[on_goal] += self.all_on_goal / self.n_agents
 
     def compute_mixing_rewards(self, agent):
@@ -603,7 +623,8 @@ class Scenario(BaseScenario):
                    agent.agent_final_reward)
 
             # TODO: Using for debugging
-            reward = rendering.TextLine(f'{agent.name} rew: {rew[env_index]:.2f}', x=150, y=(600 - (50 * int(agent.name.split('_')[-1]))))
+            reward = rendering.TextLine(f'{agent.name} rew: {rew[env_index]:.2f}', x=150,
+                                        y=(600 - (50 * int(agent.name.split('_')[-1]))))
             geoms.append(reward)
             # TODO: Add agent labels?
 
@@ -619,6 +640,6 @@ if __name__ == '__main__':
         mix_shaping=True,
         task_type="nav",
         clamp_actions=True,
-        agent_collision_penalty=-0.5,
-        env_collision_penalty=-0.5
+        agent_collision_penalty=-0.2,
+        env_collision_penalty=-0.2
     )

@@ -447,6 +447,7 @@ class Environment(TorchVectorizedObject):
     # set env action for a particular agent
     def _set_action(self, action, agent):
         action = action.clone()
+        comm_action = None
         if not self.grad_enabled:
             action = action.detach()
         action = action.to(self.device)
@@ -560,7 +561,8 @@ class Environment(TorchVectorizedObject):
             else:
                 # Why was comm_action being redefined here?
                 # Removing as breaks case where agent action size is > dim_p
-                # comm_action = action[:, action_index:]
+                if comm_action is None:
+                    comm_action = action[:, action_index:]
                 assert not torch.any(comm_action > 1) and not torch.any(
                     comm_action < 0
                 ), "Comm actions are out of range [0,1]"
