@@ -124,6 +124,10 @@ class Viewer(object):
 
     def set_bounds(self, left, right, bottom, top):
         assert right > left and top > bottom
+        # TODO: Introducing this to debug information
+        left *= 3
+        bottom *= 3
+
         self.bounds = torch.tensor([left, right, bottom, top], device=left.device)
         scalex = self.width / (right - left)
         scaley = self.height / (top - bottom)

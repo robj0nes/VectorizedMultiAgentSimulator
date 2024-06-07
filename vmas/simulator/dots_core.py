@@ -1,9 +1,11 @@
 import typing
+from typing import List
 
 import torch
 from torch import Tensor
 
 from vmas.simulator.core import Agent, World, Landmark, Box, AgentState, EntityState
+from vmas.simulator.rendering import Geom
 from vmas.simulator.utils import Color, override
 
 
@@ -68,6 +70,12 @@ class DOTSAgent(Agent):
 
     def set_payload(self, payload: Tensor, batch_index: int):
         self._set_state_property(DOTSAgentState.payload, self.state, payload, batch_index)
+
+    @override(Agent)
+    def render(self, env_index: int = 0) -> "List[Geom]":
+        geoms = super().render(env_index)
+        # TODO: Render additional actions here eg. print mixing coefficients.
+        return geoms
 
 
 class DOTSAgentState(AgentState):
@@ -137,6 +145,8 @@ class DOTSAgentState(AgentState):
                 self.batch_dim, *self.payload_shape, device=self.device, dtype=torch.float32
             )
         super()._spawn(dim_c, dim_p)
+
+
 
 
 class DOTSPayloadDest(Landmark):
