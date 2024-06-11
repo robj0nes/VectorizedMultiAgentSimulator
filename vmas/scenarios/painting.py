@@ -35,6 +35,8 @@ class Scenario(BaseScenario):
         self.arena_size = None
         self.task_type = None
         self.goals = None
+        self.agent_list = None
+        self.coms_network = None
 
         # Agent properties
         self.payload_shape = None
@@ -76,7 +78,6 @@ class Scenario(BaseScenario):
         self.mixing_thresh = kwargs.get("mixing_thresh", 0.01)
         self.learn_mix = kwargs.get("learn_mix", True)
 
-
         # Size of coms = No coms if only testing navigation,
         #   else: 1-D mixing intent + N-D payload.
         self.dim_c = kwargs.get("dim_c", 1 + self.payload_shape[1]) \
@@ -108,11 +109,15 @@ class Scenario(BaseScenario):
             world.add_agent(agent)
 
         if self.isolated_coms:
+            # Learn a separate coms network which observes all agent coms signals
+            #  and outputs coms of size [n_agents * dim_c]
             coms_network = DOTSComsNetwork(
                 name="coms_network",
                 action_size=self.dim_c * self.n_agents
             )
+            coms_network.final_rew = torch.zeros(batch_dim, device=device)
             world.add_agent(coms_network)
+            self.coms_network = coms_network
 
         self.goals = []
         for i in range(self.n_goals):
@@ -299,54 +304,64 @@ class Scenario(BaseScenario):
     #  2. Work on communications observation once coms GNN is implemented
 
     def observation(self, agent: DOTSAgent) -> AGENT_OBS_TYPE:
-        # TODO: Test if adding this reduces collisions/improves training.. first try suggests not.
-        # Get vector norm distance to all other agents.
-        other_agents = torch.transpose(
-            torch.stack(
-                [
-                    torch.linalg.vector_norm((agent.state.pos - a.state.pos), dim=1)
-                    for a in self.agent_list if a != agent
-                ]
-            ), 0, 1
-        ) if self.observe_other_agents else torch.empty(0)
+        if type(agent).__name__ == "DOTSAgent":
+            # TODO: Test if adding this reduces collisions/improves training.. first try suggests not.
+            # Get vector norm distance to all other agents.
+            other_agents = torch.transpose(
+                torch.stack(
+                    [
+                        torch.linalg.vector_norm((agent.state.pos - a.state.pos), dim=1)
+                        for a in self.agent_list if a != agent
+                    ]
+                ), 0, 1
+            ) if self.observe_other_agents else torch.empty(0)
 
-        task_obs = [self.compute_goal_observations(agent)]
-        # if self.task_type != "mix":
-        #     # Collect distance deltas to goals.
-        #     task_obs.append(self.compute_goal_observations(agent))
+            task_obs = [self.compute_goal_observations(agent)]
 
-        if self.task_type != "nav":
-            if not self.isolated_coms:
-                if self.learn_coms:
-                    # Collect communications from other agents.
-                    agent_coms = torch.stack(
-                        [a.state.c for a in self.agent_list if a != agent]
-                    )
-                else:
-                    # Assume agents communicate correctly:
-                    #   Directly observe the source payload of the other agents.
-                    agent_coms = torch.stack(
-                        [a.state.payload[:, 0, :] for a in self.agent_list if a != agent]
-                    )
+            if self.task_type != "nav":
+                self.compute_coms_observations(agent, task_obs)
 
-                for c in agent_coms:
-                    task_obs.append(c)
+            return torch.cat(
+                ([
+                     agent.state.pos,
+                     agent.state.vel,
+                     agent.state.payload[:, 0, :],
+                     agent.state.payload[:, 1, :]
+                 ]
+                 + [*task_obs]
+                 + [other_agents]),
+                dim=-1,
+            )
+        elif type(agent).__name__ == "DOTSComsNetwork":
+            # Independent coms network observes all agent coms and learns to relay a signal to each of the agents.
+            agent_coms = [a.state.c for a in self.agent_list]
+            return torch.cat(agent_coms, dim=-1)
+
+    def compute_coms_observations(self, agent, task_obs):
+        if not self.isolated_coms:
+            if self.learn_coms:
+                # Collect communications from other agents.
+                agent_coms = torch.stack(
+                    [a.state.c for a in self.agent_list if a != agent]
+                )
             else:
-                print()
-                # TODO: Get coms embedding from corresponding agent node in external coms GNN
-                pass
+                # Assume agents communicate correctly:
+                #   Directly observe the source payload of the other agents.
+                agent_coms = torch.stack(
+                    [a.state.payload[:, 0, :] for a in self.agent_list if a != agent]
+                )
 
-        return torch.cat(
-            ([
-                 agent.state.pos,
-                 agent.state.vel,
-                 agent.state.payload[:, 0, :],
-                 agent.state.payload[:, 1, :]
-             ]
-             + [*task_obs]
-             + [other_agents]),
-            dim=-1,
-        )
+            for c in agent_coms:
+                task_obs.append(c)
+        else:
+            # Get the (agent index * dim_c) output from the coms GNN
+            if self.coms_network.action.u is not None:
+                agent_index = int(agent.name.split('_')[1])
+                com_start = self.dim_c * agent_index
+                incoming_coms = self.coms_network.action.u[:, com_start: com_start + self.dim_c]
+                task_obs.append(incoming_coms)
+            else:
+                task_obs.append(torch.zeros((self.world.batch_dim, self.dim_c), device=self.world.device))
 
     # TODO: The full implementation for this will require some work as we need to define some variable
     #  observation of whether a payload-goal colour match has been made in a given batch dim.
@@ -390,70 +405,74 @@ class Scenario(BaseScenario):
 
     # Individual agent reward structure.
     def reward(self, agent: DOTSAgent) -> AGENT_REWARD_TYPE:
-        agent.agent_collision_rew[:] = 0
-        agent.obstacle_collision_rew[:] = 0
-        agent.agent_mixing_reward[:] = 0
-        agent.agent_pos_reward[:] = 0
-        agent.agent_final_reward[:] = 0
+        if agent == self.coms_network:
+            return self.final_rew
 
-        self.compute_collision_penalties(agent)
+        else:
+            agent.agent_collision_rew[:] = 0
+            agent.obstacle_collision_rew[:] = 0
+            agent.agent_mixing_reward[:] = 0
+            agent.agent_pos_reward[:] = 0
+            agent.agent_final_reward[:] = 0
 
-        # If we are the last agent, who computes global reward signals, reset final reward.
-        if agent == self.world.agents[-1]:
-            self.final_rew[:] = 0
+            self.compute_collision_penalties(agent)
 
-        # If we are just training mixing, don't bother with navigation.
-        if self.task_type != "mix":
-            self.compute_positional_rewards(agent)
+            # If we are the last agent, who computes global reward signals, reset final reward.
+            if agent == self.agent_list[-1]:
+                self.final_rew[:] = 0
 
-            if agent == self.world.agents[-1]:
-                self.final_pos_rew[:] = 0
-                for a in self.agent_list:
-                    self.final_pos_rew += a.agent_final_reward
+            # If we are just training mixing, don't bother with navigation.
+            if self.task_type != "mix":
+                self.compute_positional_rewards(agent)
 
-                if self.per_agent_reward:
-                    # Final reward is proportional to num agents who have reached their goal.
-                    self.final_rew += self.final_pos_rew
-                else:
-                    # Zero any batch dim when one or more agents have not reached their goal.
-                    self.final_pos_rew[self.final_pos_rew < self.all_on_goal] = 0
-                    # Add all_on_goal reward to batch dims when all agents have reached their goals.
-                    self.final_rew[self.final_pos_rew > 0] += self.all_on_goal
+                if agent == self.agent_list[-1]:
+                    self.final_pos_rew[:] = 0
+                    for a in self.agent_list:
+                        self.final_pos_rew += a.agent_final_reward
 
-        # If we are just training navigation, don't bother with mixing.
-        if self.task_type != "nav":
-            self.compute_mixing_rewards(agent)
+                    if self.per_agent_reward:
+                        # Final reward is proportional to num agents who have reached their goal.
+                        self.final_rew += self.final_pos_rew
+                    else:
+                        # Zero any batch dim when one or more agents have not reached their goal.
+                        self.final_pos_rew[self.final_pos_rew < self.all_on_goal] = 0
+                        # Add all_on_goal reward to batch dims when all agents have reached their goals.
+                        self.final_rew[self.final_pos_rew > 0] += self.all_on_goal
 
-            # If all agents have successfully mixed, add a final mixing reward.
-            if agent == self.world.agents[-1]:
-                self.final_mix_rew[:] = 0
-                for a in self.agent_list:
-                    # Seeking goal should be {0, 1} so multiply by total mixing reward / num agents
-                    self.final_mix_rew += a.state.seeking_goal * (self.all_mixed / self.n_agents)
+            # If we are just training navigation, don't bother with mixing.
+            if self.task_type != "nav":
+                self.compute_mixing_rewards(agent)
 
-                if self.per_agent_reward:
-                    # Final reward is proportional to num agents who have reached their goal.
-                    self.final_rew += self.final_mix_rew
-                else:
-                    # Zero any batch dim when one or more agents have not mixed.
-                    self.final_mix_rew[self.final_mix_rew < self.all_mixed] = 0
-                    # Add all_mixed reward to batch dims when all agents have mixed the correct solution.
-                    self.final_rew[self.final_mix_rew > 0] += self.all_mixed
+                # If all agents have successfully mixed, add a final mixing reward.
+                if agent == self.agent_list[-1]:
+                    self.final_mix_rew[:] = 0
+                    for a in self.agent_list:
+                        # Seeking goal should be {0, 1} so multiply by total mixing reward / num agents
+                        self.final_mix_rew += a.state.seeking_goal * (self.all_mixed / self.n_agents)
 
-        name = agent.name
-        a_pos = agent.agent_pos_reward
-        a_mix = agent.agent_mixing_reward
-        a_acol = agent.agent_collision_rew
-        a_ocol = agent.obstacle_collision_rew
-        final = self.final_rew
+                    if self.per_agent_reward:
+                        # Final reward is proportional to num agents who have reached their goal.
+                        self.final_rew += self.final_mix_rew
+                    else:
+                        # Zero any batch dim when one or more agents have not mixed.
+                        self.final_mix_rew[self.final_mix_rew < self.all_mixed] = 0
+                        # Add all_mixed reward to batch dims when all agents have mixed the correct solution.
+                        self.final_rew[self.final_mix_rew > 0] += self.all_mixed
 
-        return (
-                agent.agent_pos_reward
-                + agent.agent_mixing_reward
-                + agent.obstacle_collision_rew
-                + agent.agent_collision_rew
-                + self.final_rew
-        )
+            name = agent.name
+            a_pos = agent.agent_pos_reward
+            a_mix = agent.agent_mixing_reward
+            a_acol = agent.agent_collision_rew
+            a_ocol = agent.obstacle_collision_rew
+            final = self.final_rew
+
+            return (
+                    agent.agent_pos_reward
+                    + agent.agent_mixing_reward
+                    + agent.obstacle_collision_rew
+                    + agent.agent_collision_rew
+                    + self.final_rew
+            )
 
     def compute_positional_rewards(self, agent):
         # Collects a tensor of goals with the same colour as the mixed payload.
@@ -533,13 +552,18 @@ class Scenario(BaseScenario):
         )
 
     def info(self, agent: DOTSAgent) -> dict:
-        # TODO: Return a dictionary of reward signals to provide debugging/logging info..
-        #  At the moment this is only storing the last agents calculations.
-        return {
-            "pos_reward": agent.agent_pos_reward,
-            "mix_reward": agent.agent_mixing_reward,
-            "final_rew": self.final_rew
-        }
+        if type(agent).__name__ == "DOTSAgent":
+            # TODO: Return a dictionary of reward signals to provide debugging/logging info..
+            #  At the moment this is only storing the last agents calculations.
+            return {
+                "pos_reward": agent.agent_pos_reward,
+                "mix_reward": agent.agent_mixing_reward,
+                "final_rew": self.final_rew
+            }
+        elif type(agent).__name__ == "DOTSComsNetwork":
+            return {
+                "final_rew": self.final_rew
+            }
 
     # TODO: Implement
     #  1. A speaking exercise: Learn coms, known mixing coefficients (done)
@@ -613,7 +637,7 @@ class Scenario(BaseScenario):
         agent.state.payload[:, 1, :] = new_mix
 
     def process_action(self, agent: DOTSAgent):
-        if self.task_type != "nav":
+        if self.task_type != "nav" and agent in self.agent_list:
             self.mix_payloads(agent)
 
     def top_layer_render(self, env_index: int = 0):
