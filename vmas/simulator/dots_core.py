@@ -78,6 +78,19 @@ class DOTSAgent(Agent):
         return geoms
 
 
+class DOTSComsNetwork(Agent):
+    """
+    Defines a separate 'agent' to represent an isolated communications network in the DOTS environment.
+    """
+    def __init__(self, name, **kwargs):
+        super().__init__(name, **kwargs)
+
+    @override(Agent)
+    def render(self, env_index: int = 0) -> "List[Geom]":
+        geoms = []
+        return geoms
+
+
 class DOTSAgentState(AgentState):
     def __init__(self, payload_shape=None):
         super().__init__()
