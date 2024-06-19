@@ -16,8 +16,9 @@ from vmas.simulator.utils import AGENT_REWARD_TYPE, AGENT_OBS_TYPE, ScenarioUtil
 
 
 # TODO:
-#  1. Look at a navigation implementation driven by coms only.
-#  2. Try to integrate coms and nav once above is solved.
+#  1. Separate coms GNN. What is the observation/input space?
+#       Agent generates coms signal -> GNN convolve signals -> Agents observe GNN convolution?
+#  2. Multi-head agents (nav + mix)
 #  3. Later: Implementation assumes agent[i] and goal[i] are always connected. Does not necessarily generalise
 
 def get_distinct_color_list(n_cols, device: torch.device, exclusions=None):
@@ -39,7 +40,8 @@ class Scenario(BaseScenario):
         self.coms_network = None
 
         # Agent properties
-        self.payload_shape = None
+        self.knowledge_shape = None
+        self.multi_head = None
         self.agent_radius = None
         self.dim_c = None
         self.agent_action_size = None
@@ -64,8 +66,9 @@ class Scenario(BaseScenario):
         self.arena_size = 5
         self.viewer_zoom = 1.7
 
-        # Payload is of shape: [2 (source, mix), payload dim (eg. 3-RGB)]
-        self.payload_shape = kwargs.get("payload_shape", (2, 3))
+        # Knowledge is of shape: [2 (source, learnt), knowledge dim (eg. 3-RGB)]
+        self.knowledge_shape = kwargs.get("knowledge_shape", (2, 3))
+        self.multi_head = kwargs.get("multi_head", False)
 
         self.observation_proximity = kwargs.get("observation_proximity", self.arena_size)
         self.observe_all_goals = kwargs.get("observe_all_goals", False)
@@ -79,34 +82,40 @@ class Scenario(BaseScenario):
         self.learn_mix = kwargs.get("learn_mix", True)
 
         # Size of coms = No coms if only testing navigation,
-        #   else: 1-D mixing intent + N-D payload.
-        self.dim_c = kwargs.get("dim_c", 1 + self.payload_shape[1]) \
+        #   else: 1-D mixing intent + N-D knowledge.
+        self.dim_c = kwargs.get("dim_c", 1 + self.knowledge_shape[1]) \
             if self.task_type != 'nav' else 0
 
-        # Size of action = 2-D force + N-D payload co-efficients.
-        self.agent_action_size = kwargs.get("action_size", 2 + self.payload_shape[1])
+        # Size of action = 2-D force + N-D knowledge co-efficients.
+        self.agent_action_size = kwargs.get("action_size", 2 + self.knowledge_shape[1])
 
-        # dim_c is the size of the communications signal.
         world = DOTSWorld(batch_dim, device, collision_force=100, dim_c=self.dim_c)
         self.agent_list = []
 
-        for i in range(self.n_agents):
-            agent = DOTSAgent(
-                name=f"agent_{i}",
-                shape=Sphere(self.agent_radius),
-                color=Color.GREEN,
-                payload_shape=self.payload_shape,
-                silent=True if self.dim_c == 0 else False,
-                # TODO: Make action size > 2 to learn mixing weights.
-                action_size=self.agent_action_size
-            )
-            agent.agent_collision_rew = torch.zeros(batch_dim, device=device)
-            agent.obstacle_collision_rew = agent.agent_collision_rew.clone()
-            agent.agent_pos_reward = agent.agent_collision_rew.clone()
-            agent.agent_final_reward = agent.agent_collision_rew.clone()
-            agent.agent_mixing_reward = agent.agent_collision_rew.clone()
-            self.agent_list.append(agent)
-            world.add_agent(agent)
+        # TODO: If we take this approach we need to consider how to implement the two agents as one entity.
+        # Handle multi-head agent naming conventions.
+        name_ext = [""]
+        if self.multi_head:
+            name_ext = ["nav_", "mix_"]
+
+        for ext in name_ext:
+            for i in range(self.n_agents):
+                agent = DOTSAgent(
+                    name=f"{ext}agent_{i}",
+                    shape=Sphere(self.agent_radius),
+                    color=Color.GREEN,
+                    knowledge_shape=self.knowledge_shape,
+                    silent=True if self.dim_c == 0 else False,
+                    # TODO: Make action size > 2 to learn mixing weights.
+                    action_size=self.agent_action_size
+                )
+                agent.agent_collision_rew = torch.zeros(batch_dim, device=device)
+                agent.obstacle_collision_rew = agent.agent_collision_rew.clone()
+                agent.agent_pos_reward = agent.agent_collision_rew.clone()
+                agent.agent_final_reward = agent.agent_collision_rew.clone()
+                agent.agent_mixing_reward = agent.agent_collision_rew.clone()
+                self.agent_list.append(agent)
+                world.add_agent(agent)
 
         if self.isolated_coms:
             # Learn a separate coms network which observes all agent coms signals
@@ -126,7 +135,7 @@ class Scenario(BaseScenario):
                 collide=False,
                 shape=Box(length=self.agent_radius * 4, width=self.agent_radius * 4),
                 color=Color.BLUE,
-                expected_payload_shape=3
+                expected_knowledge_shape=3
             )
             self.goals.append(goal)
             world.add_landmark(goal)
@@ -153,27 +162,27 @@ class Scenario(BaseScenario):
         return world
 
     def premix_paints(self, small, large, device):
-        large_payloads = torch.stack(
+        large_knowledge = torch.stack(
             [
                 get_distinct_color_list(large, device) for _ in range(self.world.batch_dim)
             ]
         )
 
         # ran_ints = [
-        #     random.sample(range(large_payloads.shape[1]), small) for _ in range(self.world.batch_dim)
+        #     random.sample(range(large_knowledges.shape[1]), small) for _ in range(self.world.batch_dim)
         # ]
 
         # TODO: Test nav with random agent-goal assignments. Make sure that observations are
         #  based on colour match, not agent index.
-        small_payloads = torch.stack(
+        small_knowledge = torch.stack(
             [
                 torch.stack(
                     [
                         # Random goal assignment
-                        # large_payloads[j][i] for i in ran_ints[j]
+                        # large_knowledges[j][i] for i in ran_ints[j]
 
                         # Indexed goal assignment
-                        large_payloads[j][i] for i in range(large_payloads.shape[1])
+                        large_knowledge[j][i] for i in range(large_knowledge.shape[1])
                     ]
                 )
                 for j in range(self.world.batch_dim)
@@ -181,18 +190,18 @@ class Scenario(BaseScenario):
         )
 
         for i in range(self.world.batch_dim):
-            for sp in small_payloads[i]:
+            for sp in small_knowledge[i]:
                 assert (
-                        sp in large_payloads[i]
-                ), "Trying to assign matching payloads to goals, but found a mismatch"
+                        sp in large_knowledge[i]
+                ), "Trying to assign matching knowledges to goals, but found a mismatch"
 
-        return small_payloads, large_payloads
+        return small_knowledge, large_knowledge
 
     # TODO: Have some check to ensure all goal mixes are unique.
     def unmixed_paints(self, device):
         t = np.linspace(-510, 510, self.n_agents)
         # Generate a linear distribution across RGB colour space
-        agent_payloads = torch.stack(
+        agent_knowledge = torch.stack(
             [
                 torch.tensor(
                     np.round(
@@ -210,10 +219,10 @@ class Scenario(BaseScenario):
                 for _ in range(self.world.batch_dim)
             ]
         )
-        agent_payloads /= 255
+        agent_knowledge /= 255
 
         # Generate a random colour in RGB colour space for the goals.
-        goal_payloads = torch.stack(
+        goal_knowledge = torch.stack(
             [
                 torch.stack([
                     torch.tensor(np.random.uniform(0.01, 1.0, 3), device=device, dtype=torch.float32)
@@ -223,18 +232,18 @@ class Scenario(BaseScenario):
             ]
         )
 
-        return agent_payloads, goal_payloads
+        return agent_knowledge, goal_knowledge
 
     def random_paint_generator(self, device: torch.device):
         if self.task_type == 'nav':
             if self.n_goals <= self.n_agents:
-                goal_payloads, agent_payloads = self.premix_paints(self.n_goals, self.n_agents, device)
+                goal_knowledge, agent_knowledge = self.premix_paints(self.n_goals, self.n_agents, device)
             else:
-                agent_payloads, goal_payloads = self.premix_paints(self.n_agents, self.n_goals, device)
+                agent_knowledge, goal_knowledge = self.premix_paints(self.n_agents, self.n_goals, device)
         else:
-            # TODO: Full problem: create a set of n_goals from a mix of RGB agent payloads.
-            agent_payloads, goal_payloads = self.unmixed_paints(device)
-        return agent_payloads, goal_payloads
+            # TODO: Full problem: create a set of n_goals from a mix of RGB agent knowledges.
+            agent_knowledge, goal_knowledge = self.unmixed_paints(device)
+        return agent_knowledge, goal_knowledge
 
     def reset_agents(self, env_index):
         ScenarioUtils.spawn_entities_randomly(
@@ -246,16 +255,16 @@ class Scenario(BaseScenario):
             y_bounds=(int(-self.arena_size / 2), int(self.arena_size / 2))
         )
 
-        agent_payload, goal_payload = self.random_paint_generator(self.world.device)
+        agent_knowledge, goal_knowledge = self.random_paint_generator(self.world.device)
 
         for i, agent in enumerate(self.agent_list):
-            # Form a payload of shape [Batch_dim, RGB source, RGB mixed] default mixed to source value.
-            payload = agent_payload[:, i, :].unsqueeze(1).repeat(1, 2, 1)
-            agent.set_payload(payload, batch_index=env_index)
+            # Form a knowledge of shape [Batch_dim, RGB source, RGB mixed] default mixed to source value.
+            knowledge = agent_knowledge[:, i, :].unsqueeze(1).repeat(1, 2, 1)
+            agent.set_knowledge(knowledge, batch_index=env_index)
 
         for i, goal in enumerate(self.goals):
             # Goal should be of shape: [Batch dim, RGB]
-            goal.set_expected_payload(goal_payload[:, i, :], batch_index=env_index)
+            goal.set_expected_knowledge(goal_knowledge[:, i, :], batch_index=env_index)
 
         # Preliminary position and mix shaping to all goals.
         # Clone distances to use as normalisation during reward computation.
@@ -270,8 +279,9 @@ class Scenario(BaseScenario):
                 agent.mix_shaping = (
                         torch.stack(
                             [
-                                torch.linalg.vector_norm((agent.state.payload[:, 1, :] - goal.state.expected_payload),
-                                                         dim=1)
+                                torch.linalg.vector_norm(
+                                    (agent.state.knowledge[:, 1, :] - goal.state.expected_knowledge),
+                                    dim=1)
                                 for goal in self.goals
                             ])
                         * self.mix_shaping_factor)
@@ -286,7 +296,7 @@ class Scenario(BaseScenario):
                         torch.stack(
                             [
                                 torch.linalg.vector_norm(
-                                    (agent.state.payload[env_index, 1, :] - goal.state.expected_payload[env_index]),
+                                    (agent.state.knowledge[env_index, 1, :] - goal.state.expected_knowledge[env_index]),
                                     dim=1)
                                 for goal in self.goals
                             ])
@@ -325,8 +335,8 @@ class Scenario(BaseScenario):
                 ([
                      agent.state.pos,
                      agent.state.vel,
-                     agent.state.payload[:, 0, :],
-                     agent.state.payload[:, 1, :]
+                     agent.state.knowledge[:, 0, :],
+                     agent.state.knowledge[:, 1, :]
                  ]
                  + [*task_obs]
                  + [other_agents]),
@@ -338,7 +348,17 @@ class Scenario(BaseScenario):
             return torch.cat(agent_coms, dim=-1)
 
     def compute_coms_observations(self, agent, task_obs):
-        if not self.isolated_coms:
+        if self.isolated_coms:
+            # Get the (agent index * dim_c) output from the coms GNN
+            if self.coms_network.action.u is not None:
+                agent_index = int(agent.name.split('_')[-1])
+                com_start = self.dim_c * agent_index
+                incoming_coms = self.coms_network.action.u[:, com_start: com_start + self.dim_c]
+                task_obs.append(incoming_coms)
+            else:
+                task_obs.append(torch.zeros((self.world.batch_dim, self.dim_c), device=self.world.device))
+
+        else:
             if self.learn_coms:
                 # Collect communications from other agents.
                 agent_coms = torch.stack(
@@ -346,37 +366,28 @@ class Scenario(BaseScenario):
                 )
             else:
                 # Assume agents communicate correctly:
-                #   Directly observe the source payload of the other agents.
+                #   Directly observe the source knowledge of the other agents.
                 agent_coms = torch.stack(
-                    [a.state.payload[:, 0, :] for a in self.agent_list if a != agent]
+                    [a.state.knowledge[:, 0, :] for a in self.agent_list if a != agent]
                 )
 
             for c in agent_coms:
                 task_obs.append(c)
-        else:
-            # Get the (agent index * dim_c) output from the coms GNN
-            if self.coms_network.action.u is not None:
-                agent_index = int(agent.name.split('_')[1])
-                com_start = self.dim_c * agent_index
-                incoming_coms = self.coms_network.action.u[:, com_start: com_start + self.dim_c]
-                task_obs.append(incoming_coms)
-            else:
-                task_obs.append(torch.zeros((self.world.batch_dim, self.dim_c), device=self.world.device))
 
     # TODO: The full implementation for this will require some work as we need to define some variable
-    #  observation of whether a payload-goal colour match has been made in a given batch dim.
+    #  observation of whether a knowledge-goal colour match has been made in a given batch dim.
     #   - Perhaps best to always observe goal, but only receive positional rewards once colour match has been made.
     #  ..
     def compute_goal_observations(self, agent):
         # Forms a list of tensors [distX, distY, R, G, B] for each goal.
-        #   Shape [Batch size, n_goals * (2 + payload_dims)]
+        #   Shape [Batch size, n_goals * (2 + knowledge_dims)]
         if self.observe_all_goals:
             # If we observe all goals, simply compute distance to each goal.
             goals = [
                 torch.cat(
                     [
                         goal.state.pos - agent.state.pos,
-                        goal.state.expected_payload
+                        goal.state.expected_knowledge
                     ],
                     dim=-1)
                 for goal in self.goals
@@ -384,20 +395,20 @@ class Scenario(BaseScenario):
 
         else:
             # TODO: Work out how to filter goals by colour match. Observe only goals with correct match.
-            agent_index = int(agent.name.split('_')[1])
+            agent_index = int(agent.name.split('_')[-1])
 
             if self.task_type == "mix":
-                # Goal obs is just the distance from expected payload.
-                # goals = self.goals[agent_index].state.expected_payload
+                # Goal obs is just the distance from expected knowledge.
+                # goals = self.goals[agent_index].state.expected_knowledge
                 goals = torch.cat(
-                    [self.goals[agent_index].state.expected_payload - agent.state.payload[:, 1, :]]
+                    [self.goals[agent_index].state.expected_knowledge - agent.state.knowledge[:, 1, :]]
                 )
             else:
-                # Goal obs is relative position and payload.
+                # Goal obs is relative position and knowledge.
                 goals = torch.cat(
                     [
                         self.goals[agent_index].state.pos - agent.state.pos,
-                        self.goals[agent_index].state.expected_payload
+                        self.goals[agent_index].state.expected_knowledge
                     ],
                     dim=-1)
 
@@ -406,6 +417,7 @@ class Scenario(BaseScenario):
     # Individual agent reward structure.
     def reward(self, agent: DOTSAgent) -> AGENT_REWARD_TYPE:
         if agent == self.coms_network:
+            # TODO: Consider if we want to implement some sort of reward signal for the coms network.. 
             return self.final_rew
 
         else:
@@ -475,11 +487,11 @@ class Scenario(BaseScenario):
             )
 
     def compute_positional_rewards(self, agent):
-        # Collects a tensor of goals with the same colour as the mixed payload.
+        # Collects a tensor of goals with the same colour as the mixed knowledge.
         colour_match = torch.stack(
             [
                 torch.linalg.vector_norm(
-                    (agent.state.payload[:, 1, :] - goal.state.expected_payload), dim=1) < self.mixing_thresh
+                    (agent.state.knowledge[:, 1, :] - goal.state.expected_knowledge), dim=1) < self.mixing_thresh
                 for goal in self.goals
             ])
 
@@ -500,7 +512,7 @@ class Scenario(BaseScenario):
             # Calculate positional reward, and update global reward info
             agent.agent_pos_reward += (shaped_dists * colour_match).sum(dim=0)
 
-        # Return true if agent with correct payload is on goal with same expected payload.
+        # Return true if agent with correct knowledge is on goal with same expected knowledge.
         matched_dists = torch.abs((dists * colour_match).sum(dim=0))
         # on_goal = torch.eq(0 < matched_dists, matched_dists < 2 * agent.shape.radius)
         on_goal = torch.eq(0 < matched_dists, matched_dists < agent.shape.radius / 2)
@@ -511,14 +523,14 @@ class Scenario(BaseScenario):
         # TODO: Currently selects a goal based on the agent index.. not very good for generalising.
         index = int(agent.name.split('_')[1])
 
-        payload_dists = torch.linalg.vector_norm(
-            (agent.state.payload[:, 1, :] - self.goals[index].state.expected_payload), dim=1)
+        knowledge_dists = torch.linalg.vector_norm(
+            (agent.state.knowledge[:, 1, :] - self.goals[index].state.expected_knowledge), dim=1)
         # Dist below threshold
-        agent.state.seeking_goal = torch.logical_or(agent.state.seeking_goal, payload_dists < self.mixing_thresh)
+        agent.state.seeking_goal = torch.logical_or(agent.state.seeking_goal, knowledge_dists < self.mixing_thresh)
 
         if self.mix_shaping:
-            # Perform reward shaping on payload mixtures.
-            mix_shaping = payload_dists * self.mix_shaping_factor
+            # Perform reward shaping on knowledge mixtures.
+            mix_shaping = knowledge_dists * self.mix_shaping_factor
             shaped_mixes = (agent.mix_shaping[index] - mix_shaping) / agent.mix_shaping_norm[index]
             agent.mix_shaping[index] = mix_shaping
             agent.agent_mixing_reward += shaped_mixes
@@ -569,105 +581,118 @@ class Scenario(BaseScenario):
     #  1. A speaking exercise: Learn coms, known mixing coefficients (done)
     #  2. A listening exercise: Known coms, learns mixing coefficients.
     #  3. Combined exercise: Learn coms, Learn mixing coefficients.
-    def mix_payloads(self, agent: DOTSAgent):
+    def mix_knowledge(self, agent: DOTSAgent):
         # TODO: Allow re-mixing after correct mix has been produced. Ie. remove constraint to ensure proper learning.
         """
         Uses the agent coms signal (c[0]) to determine if mix is desired.
-        Uses the other agent coms signal (c[1:]) to read the other payload.
+        Uses the other agent coms signal (c[1:]) to read the communicated knowledge.
         Args:
-            agent: The agent requesting the payload mix.
+            agent: The agent requesting the knowledge mix.
         """
-        agent_index = int(agent.name.split('_')[1])
+        agent_index = int(agent.name.split('_')[-1])
 
         # Establish where a request is true along the batch dim,
-        #  and the agent hasn't already mixed the correct payload.
-        #   Copy for (n_agents - 1) to simplify tensor calcs.
-        request_mix = ((torch.logical_and(agent.action.c[:, 0] > 0.5, ~agent.state.seeking_goal.squeeze()))
-                       .unsqueeze(0).repeat(self.n_agents - 1, 1))
+        #  and the agent hasn't already produced the correct solution.
+        request_mix = torch.logical_and(agent.action.c[:, 0] > 0.5, ~agent.state.seeking_goal.squeeze())
+        if not self.isolated_coms:
+            #   Copy for (n_agents - 1) to simplify tensor calcs.
+            request_mix = request_mix.unsqueeze(0).repeat(self.n_agents - 1, 1)
 
         # Find all agents in proximity along the batch dim. Shape: [n_agents-1, batch dim]
-        #  Multiply by request_mix to 0 any batch dim where the agent is not requesting to mix.
+        #  Multiply by request_mix to zero any batch dim where the agent is not requesting to mix.
         in_prox = (((torch.stack(
             [torch.linalg.norm(agent.state.pos - other.state.pos, dim=1)
              for other in self.agent_list if other != agent]))
                     < self.coms_proximity) * request_mix)
+        any_in_prox = torch.logical_or(*in_prox)
 
-        # Clone existing agent mixing payload.
-        new_mix = agent.state.payload[:, 1, :].clone()
+        # Clone existing agent learnt knowledge.
+        new_mix = agent.state.knowledge[:, 1, :].clone()
 
         # Collect agent mixing weights across batch dim.
         if self.learn_mix:
-            # Mixing weights should be the last n values of the action vector, where n is the dimension of the payload.
-            payload_dims = self.payload_shape[-1]
-            mix_coefficients = (agent.action.u[:, -payload_dims:] + 1) / 2  # Shift from [-1, 1] to [0,1]
+            # Mixing weights should be the last n values of the action vector, where n is the dimension of the knowledge.
+            knowledge_dims = self.knowledge_shape[-1]
+            mix_coefficients = (agent.action.u[:, -knowledge_dims:] + 1) / 2  # Shift from [-1, 1] to [0,1]
         else:
-            mix_coefficients = self.goals[agent_index].state.expected_payload
+            mix_coefficients = self.goals[agent_index].state.expected_knowledge
 
         # Collect incoming coms signals across the batch dim.
         if self.learn_coms:
-            # Get the communicated payload from other agents coms signals
-            com_payloads = torch.stack(
-                [other.state.c[:, 1:] for other in self.agent_list if other != agent]
-            )
+            if self.isolated_coms:
+                coms_index = agent_index * self.knowledge_shape[1]
+                # Get the relevant communication output from the coms GNN
+                com_knowledge = self.coms_network.action.u[:, coms_index: coms_index + self.knowledge_shape[1]]
+                com_knowledge = (com_knowledge + 1) / 2  # Shift from [-1, 1] to [0,1]
+            else:
+                # Get the communicated knowledge from other agents coms signals
+                com_knowledge = torch.stack(
+                    [other.state.c[:, 1:] for other in self.agent_list if other != agent]
+                )
         else:
-            # If not learning to communicate, ignore coms signals and just take collect source payloads.
-            com_payloads = torch.stack(
-                [other.state.payload[:, 0, :] for other in self.agent_list if other != agent]
+            # If not learning to communicate, ignore coms signals and just take collect source knowledge.
+            com_knowledge = torch.stack(
+                [other.state.knowledge[:, 0, :] for other in self.agent_list if other != agent]
             )
 
-        # Zero all mixing payloads which will be updated.
-        for i in range(in_prox.shape[0]):
-            new_mix[in_prox[i], :] = 0
+        if self.isolated_coms:
+            new_mix = com_knowledge * mix_coefficients
+
+        else:
+            # Zero all learnt knowledge vectors which will be updated.
+            for i in range(in_prox.shape[0]):
+                new_mix[in_prox[i], :] = 0
+
+            # Update the agent learnt knowledge with the weighted mix of the others' communicated knowledge.
+            for i in range(in_prox.shape[0]):
+                new_mix[in_prox[i], :] += com_knowledge[i, in_prox[i], :] * mix_coefficients[in_prox[i], :]
+
+            # Add agents own source knowledge along any dim where a mix has been made.
+            new_mix[any_in_prox, :] += agent.state.knowledge[any_in_prox, 0, :] * mix_coefficients[any_in_prox, :]
 
         # TODO: Remove - used for debugging coms signals.
-        agent.incoming_coms = new_mix.clone()
-        for i in range(in_prox.shape[0]):
-            agent.incoming_coms[in_prox[i], :] += com_payloads[i, in_prox[i], :]
-        comb_in_prox = torch.logical_or(*in_prox)
-        agent.incoming_coms[comb_in_prox, :] += agent.state.payload[comb_in_prox, 0, :]
-
-        # Update the agent mixing payload with the weighted mix of the others' payload.
-        for i in range(in_prox.shape[0]):
-            new_mix[in_prox[i], :] += com_payloads[i, in_prox[i], :] * mix_coefficients[in_prox[i], :]
-
-        # Add agents own payload combination along any dim where a mix has been made.
-        comb_in_prox = torch.logical_or(*in_prox)
-        new_mix[comb_in_prox, :] += agent.state.payload[comb_in_prox, 0, :] * mix_coefficients[comb_in_prox, :]
-
-        agent.state.payload[:, 1, :] = new_mix
+        if not self.isolated_coms:
+            # Sum incoming communications across the agent stack dimension.
+            agent.incoming_coms = torch.sum(com_knowledge, dim=0)
+            # Add own knowledge to coms
+            agent.incoming_coms += agent.state.knowledge[:, 0, :]
+        else:
+            agent.incoming_coms = com_knowledge
+        # self.debug_coms_signals(agent, com_knowledge, any_in_prox, in_prox, new_mix)
+        agent.state.knowledge[:, 1, :] = new_mix
 
     def process_action(self, agent: DOTSAgent):
         if self.task_type != "nav" and agent in self.agent_list:
-            self.mix_payloads(agent)
+            self.mix_knowledge(agent)
 
     def top_layer_render(self, env_index: int = 0):
         geoms = []
 
-        # Render landmark payloads
+        # Render landmark knowledges
         for landmark in self.world.landmarks:
             if isinstance(landmark, DOTSPayloadDest):
                 l, r, t, b = 0, landmark.shape.width / 2, landmark.shape.length / 4, -landmark.shape.length / 4
-                payload = rendering.make_polygon([(l, b), (l, t), (r, t), (r, b)])
+                knowledge = rendering.make_polygon([(l, b), (l, t), (r, t), (r, b)])
 
-                col = landmark.state.expected_payload[env_index].reshape(-1)
-                payload.set_color(*col)
+                col = landmark.state.expected_knowledge[env_index].reshape(-1)
+                knowledge.set_color(*col)
 
                 xform = rendering.Transform()
                 xform.set_translation(landmark.state.pos[env_index][X] - r / 2, landmark.state.pos[env_index][Y])
-                payload.add_attr(xform)
-                geoms.append(payload)
+                knowledge.add_attr(xform)
+                geoms.append(knowledge)
 
-        # Re-render agents (on top of landmarks) and agent payloads.
-        for i, agent in enumerate(self.world.agents):
+        # Re-render agents (on top of landmarks) and agent knowledges.
+        for i, agent in enumerate(self.agent_list):
             # test = agent.render(env_index=env_index)
             for elem in agent.render(env_index=env_index):
                 geoms.append(elem)
-            primary_payload = rendering.make_circle(proportion=0.5, radius=self.agent_radius / 2)
-            mixed_payload = rendering.make_circle(proportion=0.5, radius=self.agent_radius / 2)
-            primary_col = agent.state.payload[env_index][0].reshape(-1)
-            mixed_col = agent.state.payload[env_index][1].reshape(-1)
+            primary_knowledge = rendering.make_circle(proportion=0.5, radius=self.agent_radius / 2)
+            mixed_knowledge = rendering.make_circle(proportion=0.5, radius=self.agent_radius / 2)
+            primary_col = agent.state.knowledge[env_index][0].reshape(-1)
+            mixed_col = agent.state.knowledge[env_index][1].reshape(-1)
 
-            # Add a yellow ring around agents who have successfully matched their payloads.
+            # Add a yellow ring around agents who have successfully matched their knowledges.
             if agent.state.seeking_goal[env_index]:
                 success_ring = rendering.make_circle(radius=self.agent_radius, filled=True)
                 success_ring.set_color(1, 1, 0)
@@ -676,14 +701,14 @@ class Scenario(BaseScenario):
                 success_ring.add_attr(s_xform)
                 geoms.append(success_ring)
 
-            primary_payload.set_color(*primary_col)
-            mixed_payload.set_color(*mixed_col)
+            primary_knowledge.set_color(*primary_col)
+            mixed_knowledge.set_color(*mixed_col)
 
             p_xform = rendering.Transform()
-            primary_payload.add_attr(p_xform)
+            primary_knowledge.add_attr(p_xform)
 
             m_xform = rendering.Transform()
-            mixed_payload.add_attr(m_xform)
+            mixed_knowledge.add_attr(m_xform)
 
             p_xform.set_translation(agent.state.pos[env_index][X], agent.state.pos[env_index][Y])
             p_xform.set_rotation(math.pi / 2)
@@ -693,8 +718,8 @@ class Scenario(BaseScenario):
             # label = TextLine(f"Agent {i}", x=agent.state.pos[env_index][X], y=agent.state.pos[env_index][Y] - 10)
             # geoms.append(label)
 
-            geoms.append(primary_payload)
-            geoms.append(mixed_payload)
+            geoms.append(primary_knowledge)
+            geoms.append(mixed_knowledge)
 
             # TODO: Using for debugging, one or other to avoid overlapping text.
             self.render_rewards(agent, env_index, geoms)
@@ -706,7 +731,7 @@ class Scenario(BaseScenario):
 
     def render_actions(self, agent, env_index, geoms):
         if agent.action.u is not None:
-            agent_index = int(agent.name.split('_')[1])
+            agent_index = int(agent.name.split('_')[-1])
 
             incoming_coms = ("coms_in: ["
                              + ",".join([f"{c:.2f}" for c in agent.incoming_coms[env_index]])
@@ -715,24 +740,24 @@ class Scenario(BaseScenario):
                                            y=(490 - (35 * (int(agent.name.split('_')[-1]) + 1))))
 
             action = ("vel: ["
-                      + ",".join([f"{a:.2f}" for a in agent.action.u[env_index][:-self.payload_shape[-1]]])
+                      + ",".join([f"{a:.2f}" for a in agent.action.u[env_index][:-self.knowledge_shape[-1]]])
                       + "] mix_weights: ["
-                      + ",".join([f"{(a + 1) / 2:.2f}" for a in agent.action.u[env_index][-self.payload_shape[-1]:]])
+                      + ",".join([f"{(a + 1) / 2:.2f}" for a in agent.action.u[env_index][-self.knowledge_shape[-1]:]])
                       + "]")
             action_line = rendering.TextLine(f'{agent.name} {action}',
                                              y=(350 - (35 * (int(agent.name.split('_')[-1]) + 1))))
 
-            payload = ("payload: ["
-                       + ",".join([f"{p:.2f}" for p in agent.state.payload[env_index, 1, :]])
-                       + "]  goal: ["
-                       + ",".join([f"{g:.2f}" for g in self.goals[agent_index].state.expected_payload[env_index]])
-                       + "]"
-                       )
-            payload_line = rendering.TextLine(f'{agent.name} {payload}',
-                                              y=(230 - (35 * (int(agent.name.split('_')[-1]) + 1))))
+            knowledge = ("learnt: ["
+                         + ",".join([f"{p:.2f}" for p in agent.state.knowledge[env_index, 1, :]])
+                         + "]  goal: ["
+                         + ",".join([f"{g:.2f}" for g in self.goals[agent_index].state.expected_knowledge[env_index]])
+                         + "]"
+                         )
+            knowledge_line = rendering.TextLine(f'{agent.name} {knowledge}',
+                                                y=(230 - (35 * (int(agent.name.split('_')[-1]) + 1))))
             geoms.append(coms_line)
             geoms.append(action_line)
-            geoms.append(payload_line)
+            geoms.append(knowledge_line)
 
     def render_rewards(self, agent, env_index, geoms):
         rew = (agent.agent_collision_rew +
@@ -757,10 +782,10 @@ if __name__ == '__main__':
         n_goals=3,
         pos_shaping=True,
         mix_shaping=True,
-        task_type="nav",
-        action_size=2,
+        task_type="full",
+        action_size=3,
         clamp_actions=True,
         agent_collision_penalty=-0.2,
         env_collision_penalty=-0.2,
-        integrated_coms=False
+        isolated_coms=False
     )

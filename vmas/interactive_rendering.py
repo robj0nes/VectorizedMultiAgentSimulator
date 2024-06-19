@@ -111,7 +111,8 @@ class InteractiveEnv:
             ]
             # Append current coms state to action list
             for i in range(self.n_agents):
-                action_list[i] += self.c[i].tolist()
+                if not self.agents[i].silent:
+                    action_list[i] += self.c[i].tolist()
 
             action_list[self.current_agent_index][:self.agents[self.current_agent_index].action_size] = self.u[
                                                                                                         : self.agents[

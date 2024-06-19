@@ -63,13 +63,13 @@ class DOTSWorld(World):
 
 # TODO: Define a default action script which accounts for the DOTs action space.
 class DOTSAgent(Agent):
-    def __init__(self, name, payload_shape=None, **kwargs):
+    def __init__(self, name, knowledge_shape=None, **kwargs):
         super().__init__(name, **kwargs)
-        self.payload_shape = payload_shape
-        self._state = DOTSAgentState(payload_shape)
+        self.knowledge_shape = knowledge_shape
+        self._state = DOTSAgentState(knowledge_shape)
 
-    def set_payload(self, payload: Tensor, batch_index: int):
-        self._set_state_property(DOTSAgentState.payload, self.state, payload, batch_index)
+    def set_knowledge(self, knowledge: Tensor, batch_index: int):
+        self._set_state_property(DOTSAgentState.knowledge, self.state, knowledge, batch_index)
 
     @override(Agent)
     def render(self, env_index: int = 0) -> "List[Geom]":
@@ -82,6 +82,7 @@ class DOTSComsNetwork(Agent):
     """
     Defines a separate 'agent' to represent an isolated communications network in the DOTS environment.
     """
+
     def __init__(self, name, **kwargs):
         super().__init__(name, **kwargs)
 
@@ -92,15 +93,15 @@ class DOTSComsNetwork(Agent):
 
 
 class DOTSAgentState(AgentState):
-    def __init__(self, payload_shape=None):
+    def __init__(self, knowledge_shape=None):
         super().__init__()
-        self.payload_shape = payload_shape
+        self.knowledge_shape = knowledge_shape
 
         # Has agent completed primary task and is now seeking goal.
         self._seeking_goal = None
 
-        # Defines the agent payload(s)
-        self._payload = None
+        # Defines the agent knowledge(s)
+        self._knowledge = None
 
     @property
     def seeking_goal(self):
@@ -118,19 +119,19 @@ class DOTSAgentState(AgentState):
         self._seeking_goal = seeking_goal.to(self._device)
 
     @property
-    def payload(self):
-        return self._payload
+    def knowledge(self):
+        return self._knowledge
 
-    @payload.setter
-    def payload(self, payload: Tensor):
+    @knowledge.setter
+    def knowledge(self, knowledge: Tensor):
         assert (
                 self._batch_dim is not None and self._device is not None
         ), "First add an entity to the world before setting"
         assert (
-                payload.shape[0] == self._batch_dim
-        ), f"Internal state must match batch dim, got {payload.shape[0]}, expected {self._batch_dim}"
+                knowledge.shape[0] == self._batch_dim
+        ), f"Internal state must match batch dim, got {knowledge.shape[0]}, expected {self._batch_dim}"
 
-        self._payload = payload.to(self._device)
+        self._knowledge = knowledge.to(self._device)
 
     @override(AgentState)
     def _reset(self, env_index: typing.Optional[int]):
@@ -140,11 +141,11 @@ class DOTSAgentState(AgentState):
             else:
                 self.seeking_goal[env_index] = False
 
-        if self.payload is not None:
+        if self.knowledge is not None:
             if env_index is None:
-                self.payload[:] = 0
+                self.knowledge[:] = 0
             else:
-                self.payload[env_index] = 0
+                self.knowledge[env_index] = 0
 
         super()._reset(env_index)
 
@@ -153,58 +154,56 @@ class DOTSAgentState(AgentState):
         self.seeking_goal = torch.zeros(
             self.batch_dim, device=self.device, dtype=torch.bool
         )
-        if self.payload_shape is not None:
-            self.payload = torch.zeros(
-                self.batch_dim, *self.payload_shape, device=self.device, dtype=torch.float32
+        if self.knowledge_shape is not None:
+            self.knowledge = torch.zeros(
+                self.batch_dim, *self.knowledge_shape, device=self.device, dtype=torch.float32
             )
         super()._spawn(dim_c, dim_p)
 
 
-
-
 class DOTSPayloadDest(Landmark):
-    def __init__(self, expected_payload_shape=None, **kwargs):
+    def __init__(self, expected_knowledge_shape=None, **kwargs):
         super().__init__(**kwargs)
-        self.expected_payload_shape = expected_payload_shape
-        self._state = DOTSPayloadDestState(expected_payload_shape)
+        self.expected_knowledge_shape = expected_knowledge_shape
+        self._state = DOTSPayloadDestState(expected_knowledge_shape)
 
-    def set_expected_payload(self, payload: Tensor, batch_index: int):
-        self._set_state_property(DOTSPayloadDestState.expected_payload, self.state, payload, batch_index)
+    def set_expected_knowledge(self, knowledge: Tensor, batch_index: int):
+        self._set_state_property(DOTSPayloadDestState.expected_knowledge, self.state, knowledge, batch_index)
 
 
 class DOTSPayloadDestState(EntityState):
-    def __init__(self, expected_payload_shape=None):
+    def __init__(self, expected_knowledge_shape=None):
         super().__init__()
-        self.expected_payload_shape = expected_payload_shape
-        self._expected_payload = None
+        self.expected_knowledge_shape = expected_knowledge_shape
+        self._expected_knowledge = None
 
     @property
-    def expected_payload(self):
-        return self._expected_payload
+    def expected_knowledge(self):
+        return self._expected_knowledge
 
-    @expected_payload.setter
-    def expected_payload(self, exp_payload: Tensor):
+    @expected_knowledge.setter
+    def expected_knowledge(self, exp_knowledge: Tensor):
         assert (
                 self._batch_dim is not None and self._device is not None
         ), "First add an entity to the world before setting"
         assert (
-                exp_payload.shape[0] == self._batch_dim
-        ), f"Internal state must match batch dim, got {exp_payload.shape[0]}, expected {self._batch_dim}"
+                exp_knowledge.shape[0] == self._batch_dim
+        ), f"Internal state must match batch dim, got {exp_knowledge.shape[0]}, expected {self._batch_dim}"
 
-        self._expected_payload = exp_payload.to(self._device)
+        self._expected_knowledge = exp_knowledge.to(self._device)
 
     def _reset(self, env_index: typing.Optional[int]):
-        if self.expected_payload is not None:
+        if self.expected_knowledge is not None:
             if env_index is None:
-                self.expected_payload[:] = 0
+                self.expected_knowledge[:] = 0
             else:
-                self.expected_payload[env_index] = 0
+                self.expected_knowledge[env_index] = 0
 
         super()._reset(env_index)
 
     def _spawn(self, dim_c: int, dim_p: int):
-        if self.expected_payload_shape is not None:
-            self.expected_payload = torch.zeros(
-                self.batch_dim, self.expected_payload_shape, device=self.device, dtype=torch.float32
+        if self.expected_knowledge_shape is not None:
+            self.expected_knowledge = torch.zeros(
+                self.batch_dim, self.expected_knowledge_shape, device=self.device, dtype=torch.float32
             )
         super()._spawn(dim_c, dim_p)
