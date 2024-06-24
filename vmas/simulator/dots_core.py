@@ -9,6 +9,7 @@ from vmas.simulator.rendering import Geom
 from vmas.simulator.utils import Color, override
 
 
+
 class DOTSWorld(World):
     def __init__(self, batch_dim, device, **kwargs):
         super().__init__(batch_dim, device, **kwargs)
@@ -63,8 +64,11 @@ class DOTSWorld(World):
 
 # TODO: Define a default action script which accounts for the DOTs action space.
 class DOTSAgent(Agent):
-    def __init__(self, name, knowledge_shape=None, **kwargs):
+    def __init__(self, name, task, render=True, knowledge_shape=None, **kwargs):
         super().__init__(name, **kwargs)
+        self.rewards = dict()
+        self.task = task
+        self.render_agent = render
         self.knowledge_shape = knowledge_shape
         self._state = DOTSAgentState(knowledge_shape)
 
@@ -73,8 +77,11 @@ class DOTSAgent(Agent):
 
     @override(Agent)
     def render(self, env_index: int = 0) -> "List[Geom]":
-        geoms = super().render(env_index)
-        # TODO: Render additional actions here eg. print mixing coefficients.
+        if self.render_agent:
+            # TODO: Render additional actions here eg. print mixing coefficients.
+            geoms = super().render(env_index)
+        else:
+            geoms = []
         return geoms
 
 

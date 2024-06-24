@@ -124,7 +124,7 @@ class Viewer(object):
 
     def set_bounds(self, left, right, bottom, top):
         assert right > left and top > bottom
-        # TODO: Introducing this to debug information
+        # NOTE: Introducing this to debug information
         left *= 3
         bottom *= 3
 
