@@ -276,7 +276,6 @@ class Scenario(BaseScenario):
             else:
                 agent_knowledge, goal_knowledge = self.premix_paints(self.n_agents, self.n_goals, device)
         else:
-            # TODO: Full problem: create a set of n_goals from a mix of RGB agent knowledges.
             agent_knowledge, goal_knowledge = self.unmixed_paints(device)
         return agent_knowledge, goal_knowledge
 
@@ -670,10 +669,15 @@ class Scenario(BaseScenario):
         #  Multiply by request_mix to zero any batch dim where the agent is not requesting to mix.
         #  NOTE: If we are multi-head we are interested in the proximity of the navigation agents.
         #   ALT: We update the mix head agent to the same pos as the nav head agent..
-        nav_head = self.agent_list["nav"][agent_index] if self.multi_head else agent
+        # nav_head = self.agent_list["nav"][agent_index] if self.multi_head else agent
+        # in_prox = (((torch.stack(
+        #     [torch.linalg.norm(nav_head.state.pos - other.state.pos, dim=1)
+        #      for other in self.agent_list['nav'] if other != nav_head]))
+        #             < self.coms_proximity) * request_mix)
+
         in_prox = (((torch.stack(
-            [torch.linalg.norm(nav_head.state.pos - other.state.pos, dim=1)
-             for other in self.agent_list['nav'] if other != nav_head]))
+            [torch.linalg.norm(agent.state.pos - other.state.pos, dim=1)
+             for other in self.agent_list['mix'] if other != agent]))
                     < self.coms_proximity) * request_mix)
         any_in_prox = torch.logical_or(*in_prox)
 
@@ -733,9 +737,11 @@ class Scenario(BaseScenario):
         agent.state.knowledge[:, 1, :] = new_mix
 
     def process_action(self, agent: DOTSAgent):
-        # TODO: ALT implementation:
-        #   If multi-head update the pos of the mix agents to match the nav agents.
         if agent.task != "nav" and agent in self.agent_list["mix"]:
+            if self.multi_head:
+                # Update the mix agent position to be equal to the position of the nav agent counterpart.
+                agent_index = int(agent.name.split('_')[-1])
+                agent.state.pos = self.agent_list["nav"][agent_index].state.pos
             self.mix_knowledge(agent)
 
     def top_layer_render(self, env_index: int = 0):
