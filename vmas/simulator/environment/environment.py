@@ -29,6 +29,7 @@ from vmas.simulator.utils import (
 class Environment(TorchVectorizedObject):
     metadata = {
         "render.modes": ["human", "rgb_array"],
+        "render.coms": False,
         "runtime.vectorized": True,
     }
 
@@ -726,7 +727,8 @@ class Environment(TorchVectorizedObject):
                 )
 
         # Render
-        self._set_agent_comm_messages(env_index)
+        if self.metadata["render.coms"]:
+            self._set_agent_comm_messages(env_index)
 
         if plot_position_function is not None:
             self.viewer.add_onetime(
