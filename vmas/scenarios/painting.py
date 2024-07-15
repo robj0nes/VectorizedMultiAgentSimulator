@@ -321,11 +321,14 @@ class Scenario(BaseScenario):
         # Clone distances to use as normalisation during reward computation.
         for agent in self.agent_list["nav"]:
             if env_index is None:
+                test = torch.stack(
+                            [torch.linalg.vector_norm((agent.state.pos - goal.state.pos), dim=-1) for goal in
+                             self.goals])
                 agent.pos_shaping = (
                         torch.stack(
                             [torch.linalg.vector_norm((agent.state.pos - goal.state.pos), dim=-1) for goal in
-                             self.goals])
-                        * self.pos_shaping_factor).reshape(self.world.batch_dim, -1)
+                             self.goals], 1)
+                        * self.pos_shaping_factor)
                 agent.pos_shape_norm = agent.pos_shaping.clone() + EPSILON
             else:
                 agent.pos_shaping[env_index] = (
@@ -339,7 +342,7 @@ class Scenario(BaseScenario):
                         )
                         * self.pos_shaping_factor
                 )
-                agent.pos_shape_norm[:, env_index] = agent.pos_shaping[:, env_index] + EPSILON
+                agent.pos_shape_norm[env_index] = agent.pos_shaping[env_index] + EPSILON
 
         for agent in self.agent_list["mix"]:
             if env_index is None:
@@ -350,9 +353,9 @@ class Scenario(BaseScenario):
                                     (agent.state.knowledge[:, 1, :] - goal.state.expected_knowledge),
                                     dim=-1)
                                 for goal in self.goals
-                            ]
+                            ], 1
                         )
-                        * self.mix_shaping_factor).reshape(self.world.batch_dim, -1)
+                        * self.mix_shaping_factor)
                 agent.mix_shaping_norm = agent.mix_shaping.clone() + EPSILON
             else:
                 agent.mix_shaping[env_index] = (
@@ -364,7 +367,7 @@ class Scenario(BaseScenario):
                                 for goal in self.goals
                             ])
                         * self.mix_shaping_factor)
-                agent.mix_shaping_norm[:, env_index] = agent.mix_shaping[:, env_index] + EPSILON
+                agent.mix_shaping_norm[env_index] = agent.mix_shaping[env_index] + EPSILON
 
     def reset_world_at(self, env_index: int = None):
         self.reset_agents(env_index)
@@ -501,16 +504,15 @@ class Scenario(BaseScenario):
             for reward in agent.rewards.keys():
                 agent.rewards[reward][:] = 0
 
-            if agent.task != "mix":
-                self.compute_collision_penalties(agent)
+            self.compute_collision_penalties(agent)
 
             # Ignore navigation rewards if just training to mix knowledge.
-            if agent.task != "mix":
-                self.compute_positional_rewards(agent)
+
+            self.compute_positional_rewards(agent)
 
             # Ignore mixing rewards if just training to navigate.
-            if agent.task != "nav":
-                self.compute_mixing_rewards(agent)
+
+            self.compute_mixing_rewards(agent)
 
             if agent == self.all_agents[0]:
                 # Mark any goals which have been completed by navigating and mixing.
@@ -561,70 +563,73 @@ class Scenario(BaseScenario):
         self.final_rew[:] = 0
 
     def compute_positional_rewards(self, agent):
-        # Collects a tensor of goals with the same colour as the mixed knowledge.
-        goal_index = int(agent.name.split('_')[-1])
+        if agent.task != "mix":
+            # Collects a tensor of goals with the same colour as the mixed knowledge.
+            goal_index = int(agent.name.split('_')[-1])
 
-        dists = torch.stack(
-            [
-                torch.linalg.vector_norm((agent.state.pos - goal.state.pos), dim=1)
-                for goal in self.goals
-            ]).reshape(self.world.batch_dim, -1)
+            dists = torch.stack(
+                [
+                    torch.linalg.vector_norm((agent.state.pos - goal.state.pos), dim=1)
+                    for goal in self.goals
+                ], 1)
 
-        if self.pos_shaping:
-            # Perform position shaping on goal distances
-            pos_shaping = dists * self.pos_shaping_factor
+            if self.pos_shaping:
+                # Perform position shaping on goal distances
+                pos_shaping = dists * self.pos_shaping_factor
 
-            # NOTE: Test if adding 1 to scaling once mixed helps learning full task.
-            # pos_shaping = dists * (self.pos_shaping_factor + agent.state.task_complete)
+                # NOTE: Test if adding 1 to scaling once mixed helps learning full task.
+                # pos_shaping = dists * (self.pos_shaping_factor + agent.state.task_complete)
 
-            shaped_dists = (agent.pos_shaping - pos_shaping) / agent.pos_shape_norm
-            agent.pos_shaping = pos_shaping
-            agent.rewards["position"] += shaped_dists[:, goal_index]
-            # NOTE: Below can be used if we are only searching for pos rewards once colours have been matched.
-            # agent.rewards["position"] += (shaped_dists * colour_match).sum(dim=0)
+                shaped_dists = (agent.pos_shaping - pos_shaping) / agent.pos_shape_norm
+                agent.pos_shaping = pos_shaping
+                agent.rewards["position"] += shaped_dists[:, goal_index]
+                # NOTE: Below can be used if we are only searching for pos rewards once colours have been matched.
+                # agent.rewards["position"] += (shaped_dists * colour_match).sum(dim=0)
 
-        agent.state.task_complete = dists[:, goal_index] < agent.shape.radius
-        agent.rewards["final"][agent.state.task_complete] += self.final_pos_reward / self.n_agents
+            agent.state.task_complete = dists[:, goal_index] < agent.shape.radius
+            agent.rewards["final"][agent.state.task_complete] += self.final_pos_reward / self.n_agents
 
     def compute_mixing_rewards(self, agent):
-        # TODO: Currently selects a goal based on the agent index.. not very good for generalising.
-        goal_index = int(agent.name.split('_')[1])
+        if agent.task != "nav":
+            # TODO: Currently selects a goal based on the agent index.. not very good for generalising.
+            goal_index = int(agent.name.split('_')[1])
 
-        knowledge_dists = torch.stack(
-            [
-                torch.linalg.vector_norm((agent.state.knowledge[:, 1, :] - goal.state.expected_knowledge), dim=1)
-                for goal in self.goals
-            ]).reshape(self.world.batch_dim, -1)
+            knowledge_dists = torch.stack(
+                [
+                    torch.linalg.vector_norm((agent.state.knowledge[:, 1, :] - goal.state.expected_knowledge), dim=1)
+                    for goal in self.goals
+                ], 1)
 
-        # TODO: Check this logical or really wasn't needed
-        # agent.state.task_complete = torch.logical_or(agent.state.task_complete, knowledge_dists < self.mixing_thresh)
-        agent.state.task_complete = knowledge_dists[:, goal_index] < self.mixing_thresh
-        agent.rewards["final"][agent.state.task_complete] += self.final_mix_reward / self.n_agents
+            # TODO: Check this logical or really wasn't needed
+            # agent.state.task_complete = torch.logical_or(agent.state.task_complete, knowledge_dists < self.mixing_thresh)
+            agent.state.task_complete = knowledge_dists[:, goal_index] < self.mixing_thresh
+            agent.rewards["final"][agent.state.task_complete] += self.final_mix_reward / self.n_agents
 
-        if self.mix_shaping:
-            # Perform reward shaping on knowledge mixtures.
-            mix_shaping = knowledge_dists * self.mix_shaping_factor
-            shaped_mixes = (agent.mix_shaping - mix_shaping) / agent.mix_shaping_norm
-            agent.mix_shaping = mix_shaping
-            agent.rewards["mixing"] += shaped_mixes[:, goal_index]
+            if self.mix_shaping:
+                # Perform reward shaping on knowledge mixtures.
+                mix_shaping = knowledge_dists * self.mix_shaping_factor
+                shaped_mixes = (agent.mix_shaping - mix_shaping) / agent.mix_shaping_norm
+                agent.mix_shaping = mix_shaping
+                agent.rewards["mixing"] += shaped_mixes[:, goal_index]
 
     def compute_collision_penalties(self, agent):
-        if self.agent_collision_penalty != 0:
-            for a in self.agent_list['nav']:
-                if a != agent:
-                    agent.rewards["agent_collision"][
-                        self.world.get_distance(agent, a) <= self.min_collision_distance
-                        ] += self.agent_collision_penalty
-        if self.env_collision_penalty != 0:
-            for l in self.world.landmarks:
-                if self.world.collides(agent, l):
-                    if l in self.world.walls:
-                        penalty = self.env_collision_penalty
-                    else:
-                        penalty = 0
-                    agent.rewards["obstacle_collision"][
-                        self.world.get_distance(agent, l) <= self.min_collision_distance
-                        ] += penalty
+        if agent.task != "mix":
+            if self.agent_collision_penalty != 0:
+                for a in self.agent_list['nav']:
+                    if a != agent:
+                        agent.rewards["agent_collision"][
+                            self.world.get_distance(agent, a) <= self.min_collision_distance
+                            ] += self.agent_collision_penalty
+            if self.env_collision_penalty != 0:
+                for l in self.world.landmarks:
+                    if self.world.collides(agent, l):
+                        if l in self.world.walls:
+                            penalty = self.env_collision_penalty
+                        else:
+                            penalty = 0
+                        agent.rewards["obstacle_collision"][
+                            self.world.get_distance(agent, l) <= self.min_collision_distance
+                            ] += penalty
 
     def done(self):
         return torch.all(self.completed_goals, dim=-1)
@@ -633,17 +638,17 @@ class Scenario(BaseScenario):
         if type(agent).__name__ == "DOTSAgent":
             if agent.task == "mix":
                 return {
-                    "mix_reward": agent.rewards["mixing"],
+                    "mix_shaping": agent.rewards["mixing"],
                     "agent_final": agent.rewards["final"],
-                    "final_pos_rew": self.final_pos_rew,
+                    "final_mix_rew": self.final_mix_rew,
                     "final_reward": self.final_rew
                 }
 
             elif agent.task == "nav":
                 return {
-                    "nav_reward": agent.rewards["position"],
+                    "nav_shaping": agent.rewards["position"],
                     "agent_final": agent.rewards["final"],
-                    "final_mix_rew": self.final_mix_rew,
+                    "final_pos_rew": self.final_pos_rew,
                     "final_reward": self.final_rew
                 }
 
@@ -898,7 +903,7 @@ class Scenario(BaseScenario):
             #            + ",".join([f"{val}" for val in self.selected_goals[:, env_index]])
             #            + "]")
             c_goals = ("Completed Goals: ["
-                       + ",".join([f"{val}" for val in self.completed_goals[:, env_index]])
+                       + ",".join([f"{val}" for val in self.completed_goals[env_index]])
                        + "]")
             # selected_goals = rendering.TextLine(s_goals, y=vert_offset, font_size=10)
             completed_goals = rendering.TextLine(c_goals, y=vert_offset - 15, font_size=10)
