@@ -1,7 +1,5 @@
 import math
 import random
-from enum import Enum
-
 import numpy as np
 import torch
 import seaborn as sns
@@ -14,18 +12,22 @@ from vmas.simulator.rendering import TextLine
 from vmas.simulator.scenario import BaseScenario
 from vmas.simulator.utils import AGENT_REWARD_TYPE, AGENT_OBS_TYPE, ScenarioUtils, Y, X, Color
 
+# TODO:
+#  1. Mixing: Dont freeze mixing when goal is reached....
+#  2. Multi-goal setting:
+#       - Re-implement goal selection mechanisms and test 3:3 scenario performs the same.
+#       - Need a computationally efficient way of identifying dynamic target-goal index in batch dimensions.
+
 EPSILON = 1e-6
 
-
-# TODO:
-#  1. Multi-head agents (nav + mix) - Suboptimal implementation, will need lots of refactoring if it works..
-#  2. Later: Implementation assumes agent[i] and goal[i] are always connected. Does not necessarily generalise
 
 def get_distinct_color_list(n_cols, device: torch.device, exclusions=None):
     opts = sns.color_palette(palette="Set2")
     return torch.stack([torch.tensor(opts[x], device=device, dtype=torch.float32) for x in
                         random.sample(range(0, len(opts)), n_cols)])
 
+
+# TODO (non urgent): Flip tensors so that the batch dim is always first for consistency with VMAS implementation.
 
 class Scenario(BaseScenario):
     def __init__(self):
@@ -36,12 +38,15 @@ class Scenario(BaseScenario):
         self.arena_size = None
         self.task_type = None
         self.goals = None
+        self.selected_goals = None
+        self.completed_goals = None
         self.agent_list = None
         self.all_agents = None
         self.coms_network = None
 
         # Agent properties
         self.knowledge_shape = None
+        self.random_knowledge = None
         self.multi_head = None
         self.agent_radius = None
         self.dim_c = None
@@ -56,44 +61,73 @@ class Scenario(BaseScenario):
         self.mixing_thresh = 0.01
         self.learn_mix = None
         self.learn_coms = None
-        self.rew = None
+        self.per_goal_reward = None
+        self.reward_multiplier = 1
+
+    # ----------- World Creation ----------- #
 
     def make_world(self, batch_dim: int, device: torch.device, **kwargs) -> World:
-        self.task_type = kwargs.get("task_type", "nav")
+        self.initialise_task_properties(kwargs)
+        self.initialise_reward_properties(batch_dim, device, kwargs)
 
+        world = DOTSWorld(batch_dim, device, collision_force=100, dim_c=self.dim_c)
+
+        self.instantiate_goals(batch_dim, device, world)
+        self.instantiate_agents(batch_dim, device, world)
+
+        world.spawn_map()
+
+        return world
+
+    def initialise_task_properties(self, kwargs):
+        self.task_type = kwargs.get("task_type", "nav")
+        self.debug_goals = kwargs.get("debug_goals", False)
         self.n_agents = kwargs.get("n_agents", 4)
         self.n_goals = kwargs.get("n_goals", 4)
         self.agent_radius = 0.2
         self.arena_size = 5
         self.viewer_zoom = 1.7
-
         # Knowledge is of shape: [2 (source, learnt), knowledge dim (eg. 3-RGB)]
         self.knowledge_shape = kwargs.get("knowledge_shape", (2, 3))
+        self.random_knowledge = kwargs.get("random_knowledge", False)
         self.multi_head = kwargs.get("multi_head", False)
-
         self.observation_proximity = kwargs.get("observation_proximity", self.arena_size)
         self.observe_all_goals = kwargs.get("observe_all_goals", False)
         self.observe_other_agents = kwargs.get("observe_other_agents", True)
-
         self.isolated_coms = kwargs.get("isolated_coms", False)
         self.coms_proximity = kwargs.get("coms_proximity", self.arena_size)
         self.learn_coms = kwargs.get("learn_coms", True)
-
         self.mixing_thresh = kwargs.get("mixing_thresh", 0.01)
         self.learn_mix = kwargs.get("learn_mix", True)
-
         # Size of coms = No coms if only testing navigation,
         #   else: 1-D mixing intent + N-D knowledge.
         self.dim_c = kwargs.get("dim_c", 1 + self.knowledge_shape[1]) \
             if self.task_type != 'nav' else 0
-
         # Size of action = 2-D force + N-D knowledge co-efficients.
-        self.agent_action_size = kwargs.get("action_size", 2 + self.knowledge_shape[1])
+        self.agent_action_size = kwargs.get(
+            "action_size",
+            2 + self.knowledge_shape[1] if self.task_type != 'nav' else 2)
 
-        world = DOTSWorld(batch_dim, device, collision_force=100, dim_c=self.dim_c)
+    def initialise_reward_properties(self, batch_dim, device, kwargs):
+        self.agent_collision_penalty = kwargs.get("agent_collision_penalty", -0.2)
+        self.env_collision_penalty = kwargs.get("env_collision_penalty", -0.2)
+        self.min_collision_distance = kwargs.get("collision_dist", 0.005)
+        self.pos_shaping = kwargs.get("pos_shaping", False)
+        self.pos_shaping_factor = kwargs.get("pos_shaping_factor", 1.0)
+        self.mix_shaping = kwargs.get("mix_shaping", False)
+        self.mix_shaping_factor = kwargs.get("mix_shaping_factor", 1.0)
+        self.default_task_rew = kwargs.get("default_task_rew", 0.02)
+        self.final_pos_reward = kwargs.get("final_pos_reward", 0.05)
+        self.final_mix_reward = kwargs.get("final_mix_reward", 0.05)
+        self.per_agent_reward = kwargs.get("per_agent_reward", False)
+        self.per_goal_reward = kwargs.get("per_goal_reward", 0.1)
+        self.final_rew = torch.zeros(batch_dim, device=device, dtype=torch.float32)
+        self.final_pos_rew = self.final_rew.clone()
+        self.final_mix_rew = self.final_rew.clone()
+
+    def instantiate_agents(self, batch_dim, device, world):
         self.all_agents = []
         self.agent_list = {"nav": [], "mix": []}
-
         # TODO: If we take this approach we need to consider how to implement the two agents as one entity.
         # Question: Can we dynamically create agent groups?
         # Handle multi-head agent naming conventions.
@@ -106,14 +140,16 @@ class Scenario(BaseScenario):
                         shape=Sphere(self.agent_radius) if "nav" in ext else None,
                         collide=True if "nav" in ext else False,
                         color=Color.GREEN,
+                        agent_index=i,
                         task=ext.strip('-'),
                         render=True if "nav" in ext else False,
                         knowledge_shape=None if "nav" in ext else self.knowledge_shape,
                         silent=True if self.dim_c == 0 else False,
-                        # TODO: Make action size > 2 to learn mixing weights.
+                        # silent=True if "nav" in ext or self.dim_c == 0 else False,
                         action_size=self.agent_action_size
                     )
                     if "nav" in ext:
+                        self.selected_goals[i, :] = True
                         agent.rewards = {
                             "agent_collision": torch.zeros(batch_dim, device=device),
                             "obstacle_collision": torch.zeros(batch_dim, device=device),
@@ -135,9 +171,9 @@ class Scenario(BaseScenario):
                     shape=Sphere(self.agent_radius),
                     color=Color.GREEN,
                     task=self.task_type,
+                    agent_index=i,
                     knowledge_shape=self.knowledge_shape,
                     silent=True if self.dim_c == 0 else False,
-                    # TODO: Make action size > 2 to learn mixing weights.
                     action_size=self.agent_action_size
                 )
                 # TODO: Refactor to nested dictionary/object? Or make part of agent state?
@@ -149,11 +185,11 @@ class Scenario(BaseScenario):
                     "final": torch.zeros(batch_dim, device=device)
                 }
 
+                self.selected_goals[i, :] = True
                 self.agent_list["nav"].append(agent)
                 self.agent_list["mix"].append(agent)
                 self.all_agents.append(agent)
                 world.add_agent(agent)
-
         if self.isolated_coms:
             # Learn a separate coms network which observes all agent coms signals
             #  and outputs coms of size [n_agents * dim_c]
@@ -165,9 +201,12 @@ class Scenario(BaseScenario):
             world.add_agent(coms_network)
             self.coms_network = coms_network
 
+    def instantiate_goals(self, batch_dim, device, world):
         self.goals = []
-        self.completed_goals = torch.stack(
-            [torch.zeros(batch_dim, device=device) for _ in range(self.n_goals)]).reshape(batch_dim, -1)
+        self.selected_goals = torch.stack(
+            [torch.zeros(batch_dim, device=device, dtype=torch.bool) for _ in range(self.n_goals)]
+        )
+        self.completed_goals = self.selected_goals.clone()
         for i in range(self.n_goals):
             goal = DOTSPayloadDest(
                 name=f"goal_{i}",
@@ -179,33 +218,17 @@ class Scenario(BaseScenario):
             self.goals.append(goal)
             world.add_landmark(goal)
 
-        world.spawn_map()
+    # ----------- Knowledge Creation ----------- #
 
-        self.agent_collision_penalty = kwargs.get("agent_collision_penalty", -0.2)
-        self.env_collision_penalty = kwargs.get("env_collision_penalty", -0.2)
-        self.min_collision_distance = kwargs.get("collision_dist", 0.005)
-
-        self.pos_shaping = kwargs.get("pos_shaping", False)
-        self.pos_shaping_factor = kwargs.get("pos_shaping_factor", 1.0)
-
-        self.mix_shaping = kwargs.get("mix_shaping", False)
-        self.mix_shaping_factor = kwargs.get("mix_shaping_factor", 1.0)
-
-        self.final_pos_reward = kwargs.get("final_pos_reward", 0.05)
-        self.final_mix_reward = kwargs.get("final_mix_reward", 0.05)
-        self.per_agent_reward = kwargs.get("per_agent_reward", False)
-
-        self.final_rew = torch.zeros(batch_dim, device=device, dtype=torch.float32)
-        self.final_pos_rew = self.final_rew.clone()
-        self.final_mix_rew = self.final_rew.clone()
-        return world
-
-    def premix_paints(self, small, large, device):
+    def get_preset_knowledge(self, small, large, device):
         large_knowledge = torch.stack(
             [
                 get_distinct_color_list(large, device) for _ in range(self.world.batch_dim)
             ]
         )
+        # NOTE: Used to debug goal switching behaviours
+        # large_knowledge[:, self.n_agents:self.n_agents * 2, :] = large_knowledge[:, :self.n_agents, :]
+        # large_knowledge[:, self.n_agents * 2:] = large_knowledge[:, :2, :]
 
         # ran_ints = [
         #     random.sample(range(large_knowledges.shape[1]), small) for _ in range(self.world.batch_dim)
@@ -237,53 +260,69 @@ class Scenario(BaseScenario):
         return small_knowledge, large_knowledge
 
     # TODO: Have some check to ensure all goal mixes are unique.
-    def unmixed_paints(self, device):
-        t = np.linspace(-510, 510, self.n_agents)
-        # Generate a linear distribution across RGB colour space
-        agent_knowledge = torch.stack(
-            [
-                torch.tensor(
-                    np.round(
-                        np.clip(
-                            np.stack(
+    def generate_knowledge(self, device):
+        if self.random_knowledge:
+            # Generate a set of random knowledge vectors K (one per agent) such that sum over all knowledge K_i > 1.
+            agent_knowledge, solvable = None, False
+            while not solvable:
+                agent_knowledge = torch.stack(
+                    [
+                        torch.stack([
+                            torch.tensor(np.random.uniform(0.01, 1.0, self.knowledge_shape[1]), device=device,
+                                         dtype=torch.float32)
+                            for _ in range(self.n_agents)
+                        ])
+                        for _ in range(self.world.batch_dim)
+                    ]
+                )
+                solvable = True
+                for dim in range(self.knowledge_shape[1]):
+                    if torch.sum(agent_knowledge[:, dim]) < 1:
+                        solvable = False
+                        print("Regenerating agent knowledge to avoid unsolvable problem")
 
-                                [-t, 510 - np.abs(t), t],
-                                axis=1
-                            ),
-                            0,
-                            255
-                        ).astype(np.float32)
-                    ),
-                    device=device)
-                for _ in range(self.world.batch_dim)
-            ]
-        )
-        agent_knowledge /= 255
+        else:
+            single_batch = torch.stack(
+                [torch.zeros(self.n_agents, device=device, dtype=torch.float32) for _ in range(self.n_agents)])
+            for i in range(self.n_agents):
+                single_batch[i][i] += 1
+            agent_knowledge = torch.stack(
+                [
+                    single_batch.clone()
+                    for _ in range(self.world.batch_dim)
+                ]
+            )
 
-        # Generate a random colour in RGB colour space for the goals.
+        # Generate a random solution of knowledge size for each goal.
         goal_knowledge = torch.stack(
             [
                 torch.stack([
-                    torch.tensor(np.random.uniform(0.01, 1.0, 3), device=device, dtype=torch.float32)
+                    torch.tensor(np.random.uniform(0.01, 1.0, self.knowledge_shape[1]), device=device,
+                                 dtype=torch.float32)
                     for _ in range(self.n_goals)
                 ])
                 for _ in range(self.world.batch_dim)
             ]
         )
 
+        if agent_knowledge is None:
+            raise ValueError("Agent knowledge is None")
+
         return agent_knowledge, goal_knowledge
 
     def random_paint_generator(self, device: torch.device):
-        if self.task_type == 'nav':
+        if self.task_type == 'nav' or self.debug_goals:
             if self.n_goals <= self.n_agents:
-                goal_knowledge, agent_knowledge = self.premix_paints(self.n_goals, self.n_agents, device)
+                goal_knowledge, agent_knowledge = self.get_preset_knowledge(self.n_goals, self.n_agents, device)
             else:
-                agent_knowledge, goal_knowledge = self.premix_paints(self.n_agents, self.n_goals, device)
+                agent_knowledge, goal_knowledge = self.get_preset_knowledge(self.n_agents, self.n_goals, device)
         else:
-            agent_knowledge, goal_knowledge = self.unmixed_paints(device)
+            agent_knowledge, goal_knowledge = self.generate_knowledge(device)
         return agent_knowledge, goal_knowledge
 
-    def reset_agents(self, env_index):
+    # -------- Env Resets -------------#
+
+    def reset_agents_and_goals(self, env_index):
         ScenarioUtils.spawn_entities_randomly(
             self.agent_list['nav'] + self.goals,
             self.world,
@@ -312,9 +351,13 @@ class Scenario(BaseScenario):
 
         self.initialise_reward_shaping(env_index)
         if env_index is None:
+            self.selected_goals[: self.n_agents] = True
+            self.selected_goals[self.n_agents:] = False
             self.completed_goals[:] = False
         else:
-            self.completed_goals[env_index] = False
+            self.selected_goals[:self.n_agents, env_index] = True
+            self.selected_goals[self.n_agents:, env_index] = False
+            self.completed_goals[:, env_index] = False
 
     def initialise_reward_shaping(self, env_index):
         # Preliminary position and mix shaping to all goals.
@@ -325,18 +368,13 @@ class Scenario(BaseScenario):
                         torch.stack(
                             [torch.linalg.vector_norm((agent.state.pos - goal.state.pos), dim=-1) for goal in
                              self.goals])
-                        * self.pos_shaping_factor).reshape(self.world.batch_dim, -1)
+                        * self.pos_shaping_factor)
                 agent.pos_shape_norm = agent.pos_shaping.clone() + EPSILON
             else:
-                agent.pos_shaping[env_index] = (
+                agent.pos_shaping[:, env_index] = (
                         torch.stack(
-                            [
-                                torch.linalg.vector_norm(
-                                    (agent.state.pos[env_index] - goal.state.pos[env_index]),
-                                    dim=-1)
-                                for goal in self.goals
-                            ]
-                        )
+                            [torch.linalg.vector_norm((agent.state.pos[env_index] - goal.state.pos[env_index]), dim=-1)
+                             for goal in self.goals])
                         * self.pos_shaping_factor
                 )
                 agent.pos_shape_norm[:, env_index] = agent.pos_shaping[:, env_index] + EPSILON
@@ -350,12 +388,11 @@ class Scenario(BaseScenario):
                                     (agent.state.knowledge[:, 1, :] - goal.state.expected_knowledge),
                                     dim=-1)
                                 for goal in self.goals
-                            ]
-                        )
-                        * self.mix_shaping_factor).reshape(self.world.batch_dim, -1)
+                            ])
+                        * self.mix_shaping_factor)
                 agent.mix_shaping_norm = agent.mix_shaping.clone() + EPSILON
             else:
-                agent.mix_shaping[env_index] = (
+                agent.mix_shaping[:, env_index] = (
                         torch.stack(
                             [
                                 torch.linalg.vector_norm(
@@ -367,19 +404,19 @@ class Scenario(BaseScenario):
                 agent.mix_shaping_norm[:, env_index] = agent.mix_shaping[:, env_index] + EPSILON
 
     def reset_world_at(self, env_index: int = None):
-        self.reset_agents(env_index)
+        self.reset_agents_and_goals(env_index)
         self.world.reset_map(env_index)
 
-    # TODO:
+    # TODO(s):
     #  1. Implement a restriction on observations based on the self.observation_proximity value.
     #       - Maybe look at how lidar is implemented for hints on variable observation space..
-    #  2. Work on communications observation once coms GNN is implemented
+
+    # -------------- Observations ------------ #
 
     def observation(self, agent: DOTSAgent) -> AGENT_OBS_TYPE:
         if type(agent).__name__ == "DOTSAgent":
             # TODO: Test if adding this reduces collisions/improves training.. first try suggests not.
             # Get vector norm distance to all other agents.
-
             if self.observe_other_agents and agent.task == "nav":
                 other_agents = torch.transpose(
                     torch.stack(
@@ -464,207 +501,250 @@ class Scenario(BaseScenario):
             ]
 
         else:
-            # TODO: Work out how to filter goals by colour match. Observe only goals with correct match.
             agent_index = int(agent.name.split('_')[-1])
-
             if agent.task == "mix":
-                # Goal obs is just the distance from expected knowledge.
-                # goals = self.goals[agent_index].state.expected_knowledge
+                all_goal_knowledge = torch.stack([g.state.expected_knowledge for g in self.goals])
+
+                target_goal_knowledge = all_goal_knowledge[agent_index]
+                # target_goal_knowledge = torch.stack(
+                #     [all_goal_knowledge[agent.state.target_goal[i], i, :] for i in range(len(agent.state.target_goal))]
+                # )
                 goals = torch.cat(
-                    [self.goals[agent_index].state.expected_knowledge - agent.state.knowledge[:, 1, :]]
+                    [target_goal_knowledge - agent.state.knowledge[:, 1, :]]
                 )
             elif agent.task == "nav":
                 # Goal obs is relative position.
+                all_goal_pos = torch.stack([g.state.pos for g in self.goals])
+
+                target_goal_pos = all_goal_pos[agent_index]
+                # target_goal_pos = torch.stack(
+                #     [all_goal_pos[agent.state.target_goal[i], i, :] for i in range(len(agent.state.target_goal))]
+                # )
                 goals = torch.cat(
-                    [self.goals[agent_index].state.pos - agent.state.pos],
+                    [target_goal_pos - agent.state.pos],
                     dim=-1)
             else:
                 # Goal obs is relative position and knowledge.
                 goals = torch.cat(
                     [
-                        self.goals[agent_index].state.pos - agent.state.pos,
-                        self.goals[agent_index].state.expected_knowledge
+                        self.goals[agent.state.target_goal].state.pos - agent.state.pos,
+                        self.goals[agent.state.target_goal].state.expected_knowledge
                     ],
                     dim=-1)
 
         return goals
 
+    # --------------- Rewards -----------------#
+
     def reward(self, agent: DOTSAgent) -> AGENT_REWARD_TYPE:
         if agent == self.coms_network:
-            # TODO: Consider if we want to implement some sort of reward signal for the coms network.. 
+            # TODO: Consider if we want to implement some sort of reward signal for the coms network..
             return self.final_rew
 
         else:
+            self.reset_agent_rewards(agent)
             if agent == self.all_agents[0]:
                 self.reset_final_rewards()
 
-            for reward in agent.rewards.keys():
-                agent.rewards[reward][:] = 0
+            self.compute_collision_penalties(agent)
 
-            if agent.task != "mix":
-                self.compute_collision_penalties(agent)
-
-            # Ignore navigation rewards if just training to mix knowledge.
-            if agent.task != "mix":
-                self.compute_positional_rewards(agent)
-
-            # Ignore mixing rewards if just training to navigate.
-            if agent.task != "nav":
-                self.compute_mixing_rewards(agent)
+            # TODO: Once confirmed that this implementation is working, test new target goal calcs.
+            self.compute_positional_rewards(agent)
+            self.compute_mixing_rewards(agent)
 
             if agent == self.all_agents[0]:
-                # Mark any goals which have been completed by navigating and mixing.
-                for i in range(self.n_agents):
-                    self.completed_goals[:, i] = torch.logical_and(self.agent_list['nav'][i].state.task_complete,
-                                                                   self.agent_list['mix'][i].state.task_complete)
+                self.compute_final_rewards()
 
-                for a in self.agent_list['nav']:
-                    self.final_pos_rew += a.rewards["final"]
-                if self.per_agent_reward:
-                    # Final reward is proportional to num agents who have reached their goal.
-                    self.final_rew += self.final_pos_rew
-                else:
-                    # Zero any batch dim when one or more agents have not reached their goal.
-                    self.final_pos_rew[self.final_pos_rew < self.final_pos_reward - 0.01] = 0
-                    # Add all_on_goal reward to batch dims when all agents have reached their goals.
-                    self.final_rew[self.final_pos_rew > 0] += self.final_pos_reward
+            self.set_new_goal(agent)
 
-                for a in self.agent_list['mix']:
-                    # Seeking goal should be {0, 1} so multiply by total mixing reward / num agents
-                    self.final_mix_rew += a.state.task_complete * (self.final_mix_reward / self.n_agents)
-                if self.per_agent_reward:
-                    # Final reward is proportional to num agents who have reached their goal.
-                    self.final_rew += self.final_mix_rew
-                else:
-                    # Zero any batch dim when one or more agents have not mixed.
-                    self.final_mix_rew[self.final_mix_rew < self.final_mix_reward - 0.01] = 0
-                    # Add all_mixed reward to batch dims when all agents have mixed the correct solution.
-                    self.final_rew[self.final_mix_rew > 0] += self.final_mix_reward
+            task_reward = self.final_pos_rew if agent.task == "nav" \
+                else self.final_mix_rew if agent.task == "mix" \
+                else torch.zeros(self.world.batch_dim, device=self.world.device)
 
-            # Only award final reward if both mix and pos are completed.
-            self.final_rew[self.final_rew != self.final_pos_reward + self.final_mix_reward] = 0
-            name = agent.name
-            agent_rewards = agent.rewards
-            final = self.final_rew
+            return ((torch.stack([agent.rewards[r] for r in agent.rewards.keys()], dim=0).sum(dim=0)
+                     * agent.state.reward_multiplier)
+                    + task_reward
+                    + self.final_rew)
 
-            if agent.task == "nav":
-                return (torch.stack([agent.rewards[r] for r in agent.rewards.keys()], dim=0).sum(dim=0)
-                        + self.final_pos_rew + self.final_rew)
-
-            elif agent.task == "mix":
-                return (torch.stack([agent.rewards[r] for r in agent.rewards.keys()], dim=0).sum(dim=0)
-                        + self.final_mix_rew + self.final_rew)
+    def reset_agent_rewards(self, agent):
+        for reward in agent.rewards.keys():
+            agent.rewards[reward][:] = 0
 
     def reset_final_rewards(self):
         self.final_pos_rew[:] = 0
         self.final_mix_rew[:] = 0
         self.final_rew[:] = 0
 
+    def compute_final_rewards(self):
+        # Calculate a reward based on the minimum number of times ALL agents have completed a goal.
+        # completion_progress = torch.stack([a.state.reward_multiplier for a in self.agent_list['nav']])
+        # min_completion = torch.min(completion_progress, dim=0)[0] - 1
+        # self.final_rew += min_completion * self.per_goal_reward
+
+        # Add a reward if all gaols have been reached TODO: If this actually helps, make an experimental parameter
+        # self.final_rew += torch.all(self.completed_goals, dim=0) * 1
+
+        # Calculate a reward for each completed goal.
+        # self.final_rew += torch.sum(self.completed_goals, dim=0) * self.per_goal_reward
+
+        if self.per_agent_reward:
+            # Final reward is proportional to num agents who have reached their goal.
+            for a in self.agent_list['nav']:
+                self.final_pos_rew += a.rewards["final"]
+            self.final_rew += self.final_pos_rew
+        else:
+            all_tasks_complete = torch.all(torch.stack(
+                [a.state.task_complete for a in self.agent_list['nav']]
+            ), dim=0)
+            # Add final_pos_reward to batch dims when all agents have reached their goals.
+            self.final_pos_rew[all_tasks_complete] += self.final_pos_reward
+            # self.final_rew[all_tasks_complete] += self.final_pos_reward
+
+        if self.per_agent_reward:
+            # Final reward is proportional to num agents who have reached their goal.
+            for a in self.agent_list['mix']:
+                self.final_mix_rew += a.rewards["final"]
+            self.final_rew += self.final_mix_rew
+        else:
+            all_tasks_complete = torch.all(torch.stack(
+                [a.state.task_complete for a in self.agent_list['mix']]
+            ), dim=0)
+            # Add all_mixed reward to batch dims when all agents have mixed the correct solution.
+            self.final_mix_rew[all_tasks_complete] += self.final_mix_reward
+            # self.final_rew[all_tasks_complete] += self.final_mix_reward
+        self.final_rew[torch.logical_and(self.final_pos_rew > 0, self.final_mix_rew > 0)] += self.final_pos_reward + self.final_mix_reward
+
     def compute_positional_rewards(self, agent):
-        # Collects a tensor of goals with the same colour as the mixed knowledge.
-        goal_index = int(agent.name.split('_')[-1])
+        if agent.task != "mix":
+            agent_index = int(agent.name.split("_")[1])
+            dists = torch.stack(
+                [
+                    torch.linalg.vector_norm((agent.state.pos - goal.state.pos), dim=1)
+                    for goal in self.goals
+                ])
 
-        dists = torch.stack(
-            [
-                torch.linalg.vector_norm((agent.state.pos - goal.state.pos), dim=1)
-                for goal in self.goals
-            ]).reshape(self.world.batch_dim, -1)
+            if self.pos_shaping:
+                # Perform position shaping on goal distances
+                pos_shaping = dists * self.pos_shaping_factor
 
-        if self.pos_shaping:
-            # Perform position shaping on goal distances
-            pos_shaping = dists * self.pos_shaping_factor
+                shaped_dists = (agent.pos_shaping - pos_shaping) / agent.pos_shape_norm
+                agent.pos_shaping = pos_shaping
 
-            # NOTE: Test if adding 1 to scaling once mixed helps learning full task.
-            # pos_shaping = dists * (self.pos_shaping_factor + agent.state.task_complete)
+                # TODO: This is sub-optimal for tensor operations.. find a better method
+                target_shaped_dists = torch.stack([
+                    shaped_dists[agent.state.target_goal[i], i] for i in range(len(agent.state.target_goal))
+                ])
+                target_shaped_dists = shaped_dists[agent_index]
+                agent.rewards["position"] += target_shaped_dists
 
-            shaped_dists = (agent.pos_shaping - pos_shaping) / agent.pos_shape_norm
-            agent.pos_shaping = pos_shaping
-            agent.rewards["position"] += shaped_dists[:, goal_index]
-            # NOTE: Below can be used if we are only searching for pos rewards once colours have been matched.
-            # agent.rewards["position"] += (shaped_dists * colour_match).sum(dim=0)
-
-        agent.state.task_complete = dists[:, goal_index] < agent.shape.radius
-        agent.rewards["final"][agent.state.task_complete] += self.final_pos_reward / self.n_agents
+            # TODO: This is sub-optimal for tensor operations.. find a better method
+            target_dists = torch.stack([
+                dists[agent.state.target_goal[i], i] for i in range(len(agent.state.target_goal))
+            ])
+            target_dists = dists[agent_index]
+            # TODO: Non-multi-head implementations will overwrite this state when computing mixing success..
+            agent.state.task_complete = target_dists <= agent.shape.radius
+            agent.rewards["final"][agent.state.task_complete] += \
+                (self.final_pos_reward / self.n_agents) if self.final_pos_reward > 0 else self.default_task_rew
 
     def compute_mixing_rewards(self, agent):
-        # TODO: Currently selects a goal based on the agent index.. not very good for generalising.
-        goal_index = int(agent.name.split('_')[1])
+        if agent.task != "nav":
+            agent_index = int(agent.name.split("_")[1])
+            knowledge_dists = torch.stack(
+                [
+                    torch.linalg.vector_norm(
+                        (agent.state.knowledge[:, 1, :] - goal.state.expected_knowledge), dim=1)
+                    for goal in self.goals
+                ])
 
-        knowledge_dists = torch.stack(
-            [
-                torch.linalg.vector_norm((agent.state.knowledge[:, 1, :] - goal.state.expected_knowledge), dim=1)
-                for goal in self.goals
-            ]).reshape(self.world.batch_dim, -1)
+            if self.mix_shaping:
+                # Perform reward shaping on knowledge mixtures.
+                mix_shaping = knowledge_dists * self.mix_shaping_factor
+                shaped_mixes = (agent.mix_shaping - mix_shaping) / agent.mix_shaping_norm
+                agent.mix_shaping = mix_shaping
 
-        # TODO: Check this logical or really wasn't needed
-        # agent.state.task_complete = torch.logical_or(agent.state.task_complete, knowledge_dists < self.mixing_thresh)
-        agent.state.task_complete = knowledge_dists[:, goal_index] < self.mixing_thresh
-        agent.rewards["final"][agent.state.task_complete] += self.final_mix_reward / self.n_agents
+                # TODO: Sub-optimal computation
+                target_shaped_mixes = torch.stack([
+                    shaped_mixes[agent.state.target_goal[i], i] for i in range(len(agent.state.target_goal))
+                ])
+                target_shaped_mixes = shaped_mixes[agent_index]
+                agent.rewards["mixing"] += target_shaped_mixes
 
-        if self.mix_shaping:
-            # Perform reward shaping on knowledge mixtures.
-            mix_shaping = knowledge_dists * self.mix_shaping_factor
-            shaped_mixes = (agent.mix_shaping - mix_shaping) / agent.mix_shaping_norm
-            agent.mix_shaping = mix_shaping
-            agent.rewards["mixing"] += shaped_mixes[:, goal_index]
+            # Dist below threshold
+            # TODO: Sub-optimal computation
+            target_knowledge_dists = torch.stack([
+                knowledge_dists[agent.state.target_goal[i], i] for i in range(len(agent.state.target_goal))
+            ])
+            target_knowledge_dists = knowledge_dists[agent_index]
+            # TODO: Do we need a logical OR here?
+            agent.state.task_complete = target_knowledge_dists <= self.mixing_thresh
+            agent.rewards["final"][agent.state.task_complete] += \
+                (self.final_mix_reward / self.n_agents) if self.final_mix_reward > 0 else self.default_task_rew
 
     def compute_collision_penalties(self, agent):
-        if self.agent_collision_penalty != 0:
-            for a in self.agent_list['nav']:
-                if a != agent:
-                    agent.rewards["agent_collision"][
-                        self.world.get_distance(agent, a) <= self.min_collision_distance
-                        ] += self.agent_collision_penalty
-        if self.env_collision_penalty != 0:
-            for l in self.world.landmarks:
-                if self.world.collides(agent, l):
-                    if l in self.world.walls:
-                        penalty = self.env_collision_penalty
-                    else:
-                        penalty = 0
-                    agent.rewards["obstacle_collision"][
-                        self.world.get_distance(agent, l) <= self.min_collision_distance
-                        ] += penalty
+        if agent.task != "mix":
+            if self.agent_collision_penalty != 0:
+                for a in self.agent_list['nav']:
+                    if a != agent:
+                        agent.rewards["agent_collision"][
+                            self.world.get_distance(agent, a) <= self.min_collision_distance
+                            ] += self.agent_collision_penalty
+            if self.env_collision_penalty != 0:
+                for l in self.world.landmarks:
+                    if self.world.collides(agent, l):
+                        if l in self.world.walls:
+                            penalty = self.env_collision_penalty
+                        else:
+                            penalty = 0
+                        agent.rewards["obstacle_collision"][
+                            self.world.get_distance(agent, l) <= self.min_collision_distance
+                            ] += penalty
 
-    def done(self):
-        return torch.all(self.completed_goals, dim=-1)
+    # --------- Action Pre-processing -------- #
 
-    def info(self, agent: DOTSAgent) -> dict:
-        if type(agent).__name__ == "DOTSAgent":
-            if agent.task == "mix":
-                return {
-                    "mix_reward": agent.rewards["mixing"],
-                    "agent_final": agent.rewards["final"],
-                    "final_pos_rew": self.final_pos_rew,
-                    "final_reward": self.final_rew
-                }
+    def process_action(self, agent: DOTSAgent):
+        if agent.task != "nav" and agent in self.agent_list["mix"]:
+            if self.multi_head:
+                # Update the mix agent position to be equal to the position of the nav agent counterpart.
+                agent_index = int(agent.name.split('_')[-1])
+                agent.state.pos = self.agent_list["nav"][agent_index].state.pos
+            self.mix_knowledge(agent)
 
-            elif agent.task == "nav":
-                return {
-                    "nav_reward": agent.rewards["position"],
-                    "agent_final": agent.rewards["final"],
-                    "final_mix_rew": self.final_mix_rew,
-                    "final_reward": self.final_rew
-                }
-
+    def set_new_goal(self, agent):
+        if agent.task != "mix":
+            if self.multi_head:
+                # Get the counter-part agent and check both have been assigned rewards (i.e. on goal and mixed)
+                counter_part = self.agent_list["mix"][agent.agent_index]
+                # Get the batch dim where agents have completed both mixing and positional tasks for a goal.
+                update_goal = torch.logical_and(agent.state.task_complete, counter_part.state.task_complete)
+                # Mark the agents target goal index, at the batch dim, as completed.
+                self.completed_goals[agent.state.target_goal[update_goal], update_goal] = True
             else:
-                return {
-                    "pos_reward": agent.rewards["position"],
-                    "mix_reward": agent.rewards["mixing"],
-                    "agent_final": agent.rewards["final"],
-                    "final_pos_rew": self.final_pos_rew,
-                    "final_mix_rew": self.final_mix_rew,
-                    "final_reward": self.final_rew
-                }
-        elif type(agent).__name__ == "DOTSComsNetwork":
-            return {
-                "final_rew": self.final_rew
-            }
+                # TODO: This isn't useful: we need to find a better way to compute completion
+                #  for non-multi-head instances.
+                update_goal = agent.rewards["final"] > 0.03
+                self.completed_goals[agent.state.target_goal[update_goal], update_goal] = True
 
-    # TODO: Implement
-    #  1. A speaking exercise: Learn coms, known mixing coefficients (done)
-    #  2. A listening exercise: Known coms, learns mixing coefficients.
-    #  3. Combined exercise: Learn coms, Learn mixing coefficients.
+            if torch.any(update_goal):
+                # Assign goals sequentially, therefore next index is sum of goal selected so far.
+                # NOTE: Could be part of the training challenge as the network can't predict
+                #  which goals are likely to be selected..
+                next_goal_index = torch.sum(self.selected_goals, dim=0)
+                # We do not want to update the target goal if we have already assigned all goals.
+                update_goal[next_goal_index >= self.n_goals] = False
+                self.selected_goals[next_goal_index[update_goal], update_goal] = True
+
+                if torch.any(update_goal):
+                    agents_to_update = [agent, counter_part] if self.multi_head else [agent]
+                    for a in agents_to_update:
+                        # Increase the multiplier, update the agents target, and reset task_complete to False.
+                        a.state.reward_multiplier[update_goal] *= 2
+
+                        # Ensuring int conversion as there is some outstanding bug causing
+                        # next_goal_index to be a long after 50+iterations.?
+                        a.state.target_goal[update_goal] = next_goal_index[update_goal].int()
+                        a.state.task_complete[update_goal] = False
+
     def mix_knowledge(self, agent: DOTSAgent):
         # TODO: Allow re-mixing after correct mix has been produced. Ie. remove constraint to ensure proper learning.
         """
@@ -684,19 +764,11 @@ class Scenario(BaseScenario):
 
         # Find all agents in proximity along the batch dim. Shape: [n_agents-1, batch dim]
         #  Multiply by request_mix to zero any batch dim where the agent is not requesting to mix.
-        #  NOTE: If we are multi-head we are interested in the proximity of the navigation agents.
-        #   ALT: We update the mix head agent to the same pos as the nav head agent..
-        # nav_head = self.agent_list["nav"][agent_index] if self.multi_head else agent
-        # in_prox = (((torch.stack(
-        #     [torch.linalg.norm(nav_head.state.pos - other.state.pos, dim=1)
-        #      for other in self.agent_list['nav'] if other != nav_head]))
-        #             < self.coms_proximity) * request_mix)
-
         in_prox = (((torch.stack(
             [torch.linalg.norm(agent.state.pos - other.state.pos, dim=1)
              for other in self.agent_list['mix'] if other != agent]))
                     < self.coms_proximity) * request_mix)
-        any_in_prox = torch.logical_or(*in_prox)
+        any_in_prox = torch.any(in_prox, dim=0)
 
         # Clone existing agent learnt knowledge.
         new_mix = agent.state.knowledge[:, 1, :].clone()
@@ -706,11 +778,10 @@ class Scenario(BaseScenario):
             # Mixing weights should be the last n values of the action vector, where n is the dimension of the knowledge.
             knowledge_dims = self.knowledge_shape[-1]
             # # NOTE: DEBUGGING Interactive Render
-            # agent.action.u[:, -knowledge_dims:] = (self.goals[
-            #                                            int(agent.name.split('_')[-1])].state.expected_knowledge * 2) - 1
+            # agent.action.u[:, -knowledge_dims:] = (self.goals[agent.state.target_goal].state.expected_knowledge * 2) - 1
             mix_coefficients = (agent.action.u[:, -knowledge_dims:] + 1) / 2  # Shift from [-1, 1] to [0,1]
         else:
-            mix_coefficients = self.goals[agent_index].state.expected_knowledge
+            mix_coefficients = self.goals[agent.state.target_goal].state.expected_knowledge
 
         # Collect incoming coms signals across the batch dim.
         if self.learn_coms:
@@ -756,15 +827,44 @@ class Scenario(BaseScenario):
         # self.debug_coms_signals(agent, com_knowledge, any_in_prox, in_prox, new_mix)
         agent.state.knowledge[:, 1, :] = new_mix
 
-    def process_action(self, agent: DOTSAgent):
-        if agent.task != "nav" and agent in self.agent_list["mix"]:
-            if self.multi_head:
-                # Update the mix agent position to be equal to the position of the nav agent counterpart.
-                agent_index = int(agent.name.split('_')[-1])
-                agent.state.pos = self.agent_list["nav"][agent_index].state.pos
-            self.mix_knowledge(agent)
+    # ---------- Completion Signals ---------- #
 
-        # ------------  Rendering --------------- #
+    def done(self):
+        return torch.all(self.completed_goals, dim=0)
+
+    def info(self, agent: DOTSAgent) -> dict:
+        if type(agent).__name__ == "DOTSAgent":
+            if agent.task == "mix":
+                return {
+                    "agent_shaping": agent.rewards["mixing"],
+                    "agent_final": agent.rewards["final"],
+                    "final_reward": self.final_rew
+                }
+
+            elif agent.task == "nav":
+                return {
+                    "agent_collision": agent.rewards["agent_collision"],
+                    "obstacle_collision": agent.rewards["obstacle_collision"],
+                    "agent_shaping": agent.rewards["position"],
+                    "agent_final": agent.rewards["final"],
+                    "final_reward": self.final_rew
+                }
+
+            else:
+                return {
+                    "agent_collision": agent.rewards["agent_collision"],
+                    "obstacle_collision": agent.rewards["obstacle_collision"],
+                    "pos_shaping": agent.rewards["position"],
+                    "mix_shaping": agent.rewards["mixing"],
+                    "agent_final": agent.rewards["final"],
+                    "final_reward": self.final_rew
+                }
+        elif type(agent).__name__ == "DOTSComsNetwork":
+            return {
+                "final_rew": self.final_rew
+            }
+
+    # ------------  Rendering --------------- #
 
     def top_layer_render(self, env_index: int = 0):
         geoms = []
@@ -773,7 +873,7 @@ class Scenario(BaseScenario):
         for landmark in self.world.landmarks:
             if isinstance(landmark, DOTSPayloadDest):
                 goal_index = int(landmark.name.split('_')[-1])
-                if self.completed_goals[env_index, goal_index]:
+                if self.completed_goals[goal_index, env_index]:
                     base_l, base_r, base_t, base_b = (
                         0, landmark.shape.width, landmark.shape.length / 2, -landmark.shape.length / 2
                     )
@@ -878,8 +978,7 @@ class Scenario(BaseScenario):
                                              y=(vert_offset - (15 * (int(agent.name.split('_')[-1]) + 1))),
                                              font_size=10)
 
-            # target_goal = agent.state.target_goal[env_index]
-            target_goal = int(agent.name.split("_")[-1])
+            target_goal = agent.state.target_goal[env_index]
             knowledge = ("learnt: ["
                          + ",".join([f"{p:.2f}" for p in agent.state.knowledge[env_index, 1, :]])
                          + "]  goal: ["
@@ -894,20 +993,20 @@ class Scenario(BaseScenario):
 
             vert_offset -= ((15 * self.n_agents) + 30)
 
-            # s_goals = ("Selected Goals: ["
-            #            + ",".join([f"{val}" for val in self.selected_goals[:, env_index]])
-            #            + "]")
+            s_goals = ("Selected Goals: ["
+                       + ",".join([f"{val}" for val in self.selected_goals[:, env_index]])
+                       + "]")
             c_goals = ("Completed Goals: ["
                        + ",".join([f"{val}" for val in self.completed_goals[:, env_index]])
                        + "]")
-            # selected_goals = rendering.TextLine(s_goals, y=vert_offset, font_size=10)
+            selected_goals = rendering.TextLine(s_goals, y=vert_offset, font_size=10)
             completed_goals = rendering.TextLine(c_goals, y=vert_offset - 15, font_size=10)
 
             geoms.append(coms_line)
             geoms.append(out_coms_line)
             geoms.append(action_line)
             geoms.append(knowledge_line)
-            # geoms.append(selected_goals)
+            geoms.append(selected_goals)
             geoms.append(completed_goals)
 
     def render_nav_actions(self, agent, env_index, geoms):
@@ -917,24 +1016,25 @@ class Scenario(BaseScenario):
                       + "]")
 
             vert_offset = 650 - (30 * self.n_agents) - 20
-            # target_goal = rendering.TextLine(f'{agent.name} target: {agent.state.target_goal[env_index]}',
-            #                                  y=(vert_offset - (15 * (int(agent.name.split('_')[-1]) + 1))),
-            #                                  font_size=10)
-            #
-            # vert_offset -= ((15 * self.n_agents) + 20)
+            target_goal = rendering.TextLine(f'{agent.name} target: {agent.state.target_goal[env_index]}',
+                                             y=(vert_offset - (15 * (int(agent.name.split('_')[-1]) + 1))),
+                                             font_size=10)
+
+            vert_offset -= ((15 * self.n_agents) + 20)
             action_line = rendering.TextLine(f'{agent.name} {action}',
                                              y=(vert_offset - (15 * (int(agent.name.split('_')[-1]) + 1))),
                                              font_size=10)
-            #
-            # geoms.append(target_goal)
+
+            geoms.append(target_goal)
             geoms.append(action_line)
 
     def render_rewards(self, agent, env_index, geoms):
         rew_components = torch.stack([agent.rewards[r][env_index] for r in agent.rewards.keys()], dim=0)
-        total_rew = rew_components.sum(dim=0)
+        total_rew = rew_components.sum(dim=0) * agent.state.reward_multiplier[env_index]
         init_pos = 665 if "nav" in agent.task else 650
         reward = rendering.TextLine(f'{agent.name} rew: '
-                                    + ",".join([f'{r:.2f}' for r in rew_components])
+                                    + ",".join(
+            [f'{r * agent.state.reward_multiplier[env_index]:.2f}' for r in rew_components])
                                     + f' = {total_rew:.2f}', x=0,
                                     y=(init_pos - (30 * (int(agent.name.split('_')[-1]) + 1))),
                                     font_size=10)
@@ -958,5 +1058,9 @@ if __name__ == '__main__':
         clamp_actions=True,
         agent_collision_penalty=-0.2,
         env_collision_penalty=-0.2,
-        multi_head=True
+        final_mix_reward=0.1,
+        final_pos_reward=0.1,
+        multi_head=True,
+        random_knowledge=False,
+        debug_goals=False
     )
