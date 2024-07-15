@@ -164,6 +164,8 @@ class Scenario(BaseScenario):
             self.coms_network = coms_network
 
         self.goals = []
+        self.completed_goals = torch.stack(
+            [torch.zeros(batch_dim, device=device) for _ in range(self.n_goals)]).reshape(batch_dim, -1)
         for i in range(self.n_goals):
             goal = DOTSPayloadDest(
                 name=f"goal_{i}",
@@ -472,7 +474,9 @@ class Scenario(BaseScenario):
             return self.final_rew
 
         else:
-            self.reset_final_rewards(agent)
+            if agent == self.all_agents[0]:
+                self.reset_final_rewards()
+
             for reward in agent.rewards.keys():
                 agent.rewards[reward][:] = 0
 
@@ -482,6 +486,16 @@ class Scenario(BaseScenario):
             # Ignore navigation rewards if just training to mix knowledge.
             if agent.task != "mix":
                 self.compute_positional_rewards(agent)
+
+            # Ignore mixing rewards if just training to navigate.
+            if agent.task != "nav":
+                self.compute_mixing_rewards(agent)
+
+            if agent == self.all_agents[0]:
+                # Mark any goals which have been completed by navigating and mixing.
+                for i in range(self.n_agents):
+                    self.completed_goals[:, i] = torch.logical_and(self.agent_list['nav'][i].state.task_complete,
+                                                                   self.agent_list['mix'][i].state.task_complete)
 
                 for a in self.agent_list['nav']:
                     self.final_pos_rew += a.rewards["final"]
@@ -494,13 +508,9 @@ class Scenario(BaseScenario):
                     # Add all_on_goal reward to batch dims when all agents have reached their goals.
                     self.final_rew[self.final_pos_rew > 0] += self.final_pos_reward
 
-            # Ignore mixing rewards if just training to navigate.
-            if agent.task != "nav":
-                self.compute_mixing_rewards(agent)
-
                 for a in self.agent_list['mix']:
                     # Seeking goal should be {0, 1} so multiply by total mixing reward / num agents
-                    self.final_mix_rew += a.state.seeking_goal * (self.final_mix_reward / self.n_agents)
+                    self.final_mix_rew += a.state.task_complete * (self.final_mix_reward / self.n_agents)
                 if self.per_agent_reward:
                     # Final reward is proportional to num agents who have reached their goal.
                     self.final_rew += self.final_mix_rew
@@ -510,27 +520,24 @@ class Scenario(BaseScenario):
                     # Add all_mixed reward to batch dims when all agents have mixed the correct solution.
                     self.final_rew[self.final_mix_rew > 0] += self.final_mix_reward
 
-            # self.final_rew[self.final_rew != self.all_on_goal + self.all_mixed] = 0
+            # Only award final reward if both mix and pos are completed.
+            self.final_rew[self.final_rew != self.final_pos_reward + self.final_mix_reward] = 0
             name = agent.name
             agent_rewards = agent.rewards
             final = self.final_rew
 
             if agent.task == "nav":
                 return (torch.stack([agent.rewards[r] for r in agent.rewards.keys()], dim=0).sum(dim=0)
-                        + self.final_pos_rew)
+                        + self.final_pos_rew + self.final_rew)
 
             elif agent.task == "mix":
                 return (torch.stack([agent.rewards[r] for r in agent.rewards.keys()], dim=0).sum(dim=0)
-                        + self.final_mix_rew)
+                        + self.final_mix_rew + self.final_rew)
 
-    def reset_final_rewards(self, agent):
-        if agent == self.agent_list['nav'][-1]:
-            self.final_pos_rew[:] = 0
-        if agent == self.agent_list['mix'][-1]:
-            self.final_mix_rew[:] = 0
-        # If we are the last agent, who computes global reward signals, reset final reward.
-        if agent == self.all_agents[-1]:
-            self.final_rew[:] = 0
+    def reset_final_rewards(self):
+        self.final_pos_rew[:] = 0
+        self.final_mix_rew[:] = 0
+        self.final_rew[:] = 0
 
     def compute_positional_rewards(self, agent):
         # Collects a tensor of goals with the same colour as the mixed knowledge.
@@ -555,7 +562,7 @@ class Scenario(BaseScenario):
             pos_shaping = dists * self.pos_shaping_factor
 
             # NOTE: Test if adding 1 to scaling once mixed helps learning full task.
-            # pos_shaping = dists * (self.pos_shaping_factor + agent.state.seeking_goal)
+            # pos_shaping = dists * (self.pos_shaping_factor + agent.state.task_complete)
 
             shaped_dists = (agent.pos_shaping - pos_shaping) / agent.pos_shape_norm
             agent.pos_shaping = pos_shaping
@@ -563,8 +570,8 @@ class Scenario(BaseScenario):
             # NOTE: Below can be used if we are only searching for pos rewards once colours have been matched.
             # agent.rewards["position"] += (shaped_dists * colour_match).sum(dim=0)
 
-        on_goal = torch.eq(0 < dists[agent_index], dists[agent_index] < agent.shape.radius)
-        agent.rewards["final"][on_goal] += self.final_pos_reward / self.n_agents
+        agent.state.task_complete = dists[agent_index] < agent.shape.radius
+        agent.rewards["final"][agent.state.task_complete] += self.final_pos_reward / self.n_agents
 
     def compute_mixing_rewards(self, agent):
         # TODO: Currently selects a goal based on the agent index.. not very good for generalising.
@@ -573,7 +580,11 @@ class Scenario(BaseScenario):
         knowledge_dists = torch.linalg.vector_norm(
             (agent.state.knowledge[:, 1, :] - self.goals[index].state.expected_knowledge), dim=1)
         # Dist below threshold
-        agent.state.seeking_goal = torch.logical_or(agent.state.seeking_goal, knowledge_dists < self.mixing_thresh)
+
+        # TODO: Check this logical or really wasn't needed
+        # agent.state.task_complete = torch.logical_or(agent.state.task_complete, knowledge_dists < self.mixing_thresh)
+        agent.state.task_complete = knowledge_dists < self.mixing_thresh
+        agent.rewards["final"][agent.state.task_complete] += self.final_mix_reward / self.n_agents
 
         if self.mix_shaping:
             # Perform reward shaping on knowledge mixtures.
@@ -581,8 +592,6 @@ class Scenario(BaseScenario):
             shaped_mixes = (agent.mix_shaping[index] - mix_shaping) / agent.mix_shaping_norm[index]
             agent.mix_shaping[index] = mix_shaping
             agent.rewards["mixing"] += shaped_mixes
-
-        agent.rewards["final"][agent.state.seeking_goal] += self.final_mix_reward / self.n_agents
 
     def compute_collision_penalties(self, agent):
         if self.agent_collision_penalty != 0:
@@ -603,10 +612,7 @@ class Scenario(BaseScenario):
                         ] += penalty
 
     def done(self):
-        # TODO: This is placeholder.. Return a task completion signal.
-        return torch.full(
-            (self.world.batch_dim,), False, device=self.world.device
-        )
+        return torch.all(self.completed_goals, dim=-1)
 
     def info(self, agent: DOTSAgent) -> dict:
         if type(agent).__name__ == "DOTSAgent":
@@ -614,6 +620,7 @@ class Scenario(BaseScenario):
                 return {
                     "mix_reward": agent.rewards["mixing"],
                     "agent_final": agent.rewards["final"],
+                    "final_pos_rew": self.final_pos_rew,
                     "final_reward": self.final_rew
                 }
 
@@ -621,6 +628,7 @@ class Scenario(BaseScenario):
                 return {
                     "nav_reward": agent.rewards["position"],
                     "agent_final": agent.rewards["final"],
+                    "final_mix_rew": self.final_mix_rew,
                     "final_reward": self.final_rew
                 }
 
@@ -629,6 +637,8 @@ class Scenario(BaseScenario):
                     "pos_reward": agent.rewards["position"],
                     "mix_reward": agent.rewards["mixing"],
                     "agent_final": agent.rewards["final"],
+                    "final_pos_rew": self.final_pos_rew,
+                    "final_mix_rew": self.final_mix_rew,
                     "final_reward": self.final_rew
                 }
         elif type(agent).__name__ == "DOTSComsNetwork":
@@ -652,7 +662,7 @@ class Scenario(BaseScenario):
 
         # Establish where a request is true along the batch dim,
         #  and the agent hasn't already produced the correct solution.
-        request_mix = torch.logical_and(agent.action.c[:, 0] > 0.5, ~agent.state.seeking_goal.squeeze())
+        request_mix = torch.logical_and(agent.action.c[:, 0] > 0.5, ~agent.state.task_complete.squeeze())
         if not self.isolated_coms:
             #   Copy for (n_agents - 1) to simplify tensor calcs.
             request_mix = request_mix.unsqueeze(0).repeat(self.n_agents - 1, 1)
@@ -766,7 +776,7 @@ class Scenario(BaseScenario):
             mixed_col = mix_head.state.knowledge[env_index][1].reshape(-1)
 
             # Add a yellow ring around agents who have successfully matched their knowledge.
-            if mix_head.state.seeking_goal[env_index]:
+            if mix_head.state.task_complete[env_index]:
                 success_ring = rendering.make_circle(radius=self.agent_radius, filled=True)
                 success_ring.set_color(1, 1, 0)
                 s_xform = rendering.Transform()

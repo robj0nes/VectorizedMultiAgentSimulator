@@ -105,25 +105,25 @@ class DOTSAgentState(AgentState):
         self.knowledge_shape = knowledge_shape
 
         # Has agent completed primary task and is now seeking goal.
-        self._seeking_goal = None
+        self._task_complete = None
 
         # Defines the agent knowledge(s)
         self._knowledge = None
 
     @property
-    def seeking_goal(self):
-        return self._seeking_goal
+    def task_complete(self):
+        return self._task_complete
 
-    @seeking_goal.setter
-    def seeking_goal(self, seeking_goal: Tensor):
+    @task_complete.setter
+    def task_complete(self, task_complete: Tensor):
         assert (
                 self._batch_dim is not None and self._device is not None
         ), "First add an entity to the world before setting its state"
         assert (
-                seeking_goal.shape[0] == self._batch_dim
-        ), f"Internal state must match batch dim, got {seeking_goal.shape[0]}, expected {self._batch_dim}"
+                task_complete.shape[0] == self._batch_dim
+        ), f"Internal state must match batch dim, got {task_complete.shape[0]}, expected {self._batch_dim}"
 
-        self._seeking_goal = seeking_goal.to(self._device)
+        self._task_complete = task_complete.to(self._device)
 
     @property
     def knowledge(self):
@@ -142,11 +142,11 @@ class DOTSAgentState(AgentState):
 
     @override(AgentState)
     def _reset(self, env_index: typing.Optional[int]):
-        if self.seeking_goal is not None:
+        if self.task_complete is not None:
             if env_index is None:
-                self.seeking_goal[:] = False
+                self.task_complete[:] = False
             else:
-                self.seeking_goal[env_index] = False
+                self.task_complete[env_index] = False
 
         if self.knowledge is not None:
             if env_index is None:
@@ -158,7 +158,7 @@ class DOTSAgentState(AgentState):
 
     @override(AgentState)
     def _spawn(self, dim_c: int, dim_p: int):
-        self.seeking_goal = torch.zeros(
+        self.task_complete = torch.zeros(
             self.batch_dim, device=self.device, dtype=torch.bool
         )
         if self.knowledge_shape is not None:
