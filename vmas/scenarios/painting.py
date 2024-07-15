@@ -187,8 +187,8 @@ class Scenario(BaseScenario):
         self.mix_shaping = kwargs.get("mix_shaping", False)
         self.mix_shaping_factor = kwargs.get("mix_shaping_factor", 1.0)
 
-        self.all_on_goal = kwargs.get("final_pos_reward", 0.05)
-        self.all_mixed = kwargs.get("final_mix_reward", 0.05)
+        self.final_pos_reward = kwargs.get("final_pos_reward", 0.05)
+        self.final_mix_reward = kwargs.get("final_mix_reward", 0.05)
         self.per_agent_reward = kwargs.get("per_agent_reward", False)
 
         self.final_rew = torch.zeros(batch_dim, device=device, dtype=torch.float32)
@@ -490,9 +490,9 @@ class Scenario(BaseScenario):
                     self.final_rew += self.final_pos_rew
                 else:
                     # Zero any batch dim when one or more agents have not reached their goal.
-                    self.final_pos_rew[self.final_pos_rew < self.all_on_goal] = 0
+                    self.final_pos_rew[self.final_pos_rew < self.final_pos_reward - 0.01] = 0
                     # Add all_on_goal reward to batch dims when all agents have reached their goals.
-                    self.final_rew[self.final_pos_rew > 0] += self.all_on_goal
+                    self.final_rew[self.final_pos_rew > 0] += self.final_pos_reward
 
             # Ignore mixing rewards if just training to navigate.
             if agent.task != "nav":
@@ -500,15 +500,15 @@ class Scenario(BaseScenario):
 
                 for a in self.agent_list['mix']:
                     # Seeking goal should be {0, 1} so multiply by total mixing reward / num agents
-                    self.final_mix_rew += a.state.seeking_goal * (self.all_mixed / self.n_agents)
+                    self.final_mix_rew += a.state.seeking_goal * (self.final_mix_reward / self.n_agents)
                 if self.per_agent_reward:
                     # Final reward is proportional to num agents who have reached their goal.
                     self.final_rew += self.final_mix_rew
                 else:
                     # Zero any batch dim when one or more agents have not mixed.
-                    self.final_mix_rew[self.final_mix_rew < self.all_mixed] = 0
+                    self.final_mix_rew[self.final_mix_rew < self.final_mix_reward - 0.01] = 0
                     # Add all_mixed reward to batch dims when all agents have mixed the correct solution.
-                    self.final_rew[self.final_mix_rew > 0] += self.all_mixed
+                    self.final_rew[self.final_mix_rew > 0] += self.final_mix_reward
 
             # self.final_rew[self.final_rew != self.all_on_goal + self.all_mixed] = 0
             name = agent.name
@@ -563,14 +563,8 @@ class Scenario(BaseScenario):
             # NOTE: Below can be used if we are only searching for pos rewards once colours have been matched.
             # agent.rewards["position"] += (shaped_dists * colour_match).sum(dim=0)
 
-        on_goal = torch.eq(0 < dists[agent_index], dists[agent_index] < agent.shape.radius / 2)
-
-        # # Return true if agent with correct knowledge is on goal with same expected knowledge.
-        # matched_dists = torch.abs((dists * colour_match).sum(dim=0))
-        # # on_goal = torch.eq(0 < matched_dists, matched_dists < 2 * agent.shape.radius)
-        # on_goal = torch.eq(0 < matched_dists, matched_dists < agent.shape.radius / 2)
-
-        agent.rewards["final"][on_goal] += self.all_on_goal / self.n_agents
+        on_goal = torch.eq(0 < dists[agent_index], dists[agent_index] < agent.shape.radius)
+        agent.rewards["final"][on_goal] += self.final_pos_reward / self.n_agents
 
     def compute_mixing_rewards(self, agent):
         # TODO: Currently selects a goal based on the agent index.. not very good for generalising.
@@ -588,9 +582,7 @@ class Scenario(BaseScenario):
             agent.mix_shaping[index] = mix_shaping
             agent.rewards["mixing"] += shaped_mixes
 
-            if self.world.batch_dim > 1:
-                # Squeeze to conform to reward return structure.
-                agent.rewards["mixing"] = agent.rewards["mixing"].squeeze()
+        agent.rewards["final"][agent.state.seeking_goal] += self.final_mix_reward / self.n_agents
 
     def compute_collision_penalties(self, agent):
         if self.agent_collision_penalty != 0:
