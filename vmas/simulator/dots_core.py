@@ -86,7 +86,7 @@ class DOTSAgent(Agent):
         self.render_agent = render
         self.knowledge_shape = knowledge_shape
         self._counter_part = None
-        self._state = DOTSAgentState(knowledge_shape)
+        self._state = DOTSAgentState(agent_index, knowledge_shape)
 
     @property
     def counter_part(self):
@@ -143,15 +143,34 @@ class DOTSAgent(Agent):
 
 
 class DOTSAgentState(AgentState):
-    def __init__(self, knowledge_shape=None):
+    def __init__(self, agent_index, knowledge_shape=None):
         super().__init__()
+        self.agent_index = agent_index
         self.knowledge_shape = knowledge_shape
 
         # Has agent completed primary task and is now seeking goal.
         self._task_complete = None
 
+        # Has agent completed primary task and is now seeking goal.
+        self._target_goal_index = None
+
         # Defines the agent knowledge(s)
         self._knowledge = None
+
+    @property
+    def target_goal_index(self):
+        return self._target_goal_index
+
+    @target_goal_index.setter
+    def target_goal_index(self, target_goal_index: Tensor):
+        assert (
+                self._batch_dim is not None and self._device is not None
+        ), "First add an entity to the world before setting its state"
+        assert (
+                target_goal_index.shape[0] == self._batch_dim
+        ), f"Internal state must match batch dim, got {target_goal_index.shape[0]}, expected {self._batch_dim}"
+
+        self._target_goal_index = target_goal_index.to(self._device)
 
     @property
     def task_complete(self):
@@ -197,17 +216,23 @@ class DOTSAgentState(AgentState):
             else:
                 self.knowledge[env_index] = 0
 
+        if self.target_goal_index is not None:
+            if env_index is None:
+                self.target_goal_index[:] = self.agent_index
+            else:
+                self.target_goal_index[env_index] = self.agent_index
         super()._reset(env_index)
 
     @override(AgentState)
     def _spawn(self, dim_c: int, dim_p: int):
-        self.task_complete = torch.zeros(
-            self.batch_dim, device=self.device, dtype=torch.bool
-        )
+        self.task_complete = torch.zeros(self.batch_dim, device=self.device, dtype=torch.bool)
+        self.target_goal_index = torch.zeros(self.batch_dim, device=self.device, dtype=torch.long)
+
         if self.knowledge_shape is not None:
             self.knowledge = torch.zeros(
                 self.batch_dim, *self.knowledge_shape, device=self.device, dtype=torch.float32
             )
+
         super()._spawn(dim_c, dim_p)
 
 
