@@ -1,7 +1,4 @@
-import math
 import random
-from enum import Enum
-
 import numpy as np
 import torch
 import seaborn as sns
@@ -10,17 +7,15 @@ from vmas import render_interactively
 from vmas.simulator import rendering
 from vmas.simulator.core import Sphere, World, Box
 from vmas.simulator.dots_core import DOTSWorld, DOTSAgent, DOTSComsNetwork, DOTSPayloadDest
-from vmas.simulator.rendering import TextLine
 from vmas.simulator.scenario import BaseScenario
-from vmas.simulator.utils import AGENT_REWARD_TYPE, AGENT_OBS_TYPE, ScenarioUtils, Y, X, Color
+from vmas.simulator.utils import AGENT_REWARD_TYPE, AGENT_OBS_TYPE, ScenarioUtils, Color
 
 EPSILON = 1e-6
 
 
 # TODO:
-#  1. Allow mix-coefficients to change after mixing. -> retrain.
-#  2. Multi-head agents (nav + mix) - Suboptimal implementation, will need lots of refactoring if it works..
-#  3. Later: Implementation assumes agent[i] and goal[i] are always connected. Does not necessarily generalise
+#  1. Multi-goal!
+#  2. Later: Implementation assumes agent[i] and goal[i] are always connected. Does not necessarily generalise
 
 def get_distinct_color_list(n_cols, device: torch.device, exclusions=None):
     opts = sns.color_palette(palette="Set2")
@@ -36,31 +31,35 @@ class Scenario(BaseScenario):
         self.n_goals = None
         self.arena_size = None
         self.task_type = None
-        self.goals = None
-        self.agent_list = None
-        self.all_agents = None
         self.coms_network = None
 
+        # Goal Properties
+        self.goals = None
+        self.goal_width = None
+        self.goal_height = None
+        self.completed_goals = None
+
         # Agent properties
-        self.knowledge_shape = None
-        self.multi_head = None
         self.agent_radius = None
-        self.dim_c = None
+        self.agent_list = None  # Dict should be a list of agents grouped by task (i.e. 'nav', 'mix')
+        self.all_agents = None  # List of DOTSAgents
+        self.multi_head = None
+        self.knowledge_shape = None
         self.agent_action_size = None
+        self.dim_c = None
 
         # Observation and reward properties
         self.observe_other_agents = None
         self.observe_all_goals = None
-        self.completed_goals = None
         self.isolated_coms = None
         self.coms_proximity = None
         self.observation_proximity = None
-        self.mixing_thresh = 0.01
+        self.mixing_thresh = None
         self.learn_mix = None
         self.learn_coms = None
-        self.rew = None
 
     def make_world(self, batch_dim: int, device: torch.device, **kwargs) -> World:
+        self.define_world_properties(kwargs)
         self.define_task_properties(kwargs)
         self.define_reward_properties(batch_dim, device, kwargs)
 
@@ -73,13 +72,17 @@ class Scenario(BaseScenario):
 
         return world
 
-    def define_task_properties(self, kwargs):
-        self.task_type = kwargs.get("task_type", "nav")
+    def define_world_properties(self, kwargs):
         self.n_agents = kwargs.get("n_agents", 4)
         self.n_goals = kwargs.get("n_goals", 4)
-        self.agent_radius = 0.2
-        self.arena_size = 5
-        self.viewer_zoom = 1.7
+        self.agent_radius = kwargs.get("agent_radius", 0.2)
+        self.goal_width = kwargs.get("goal_width", self.agent_radius * 4)
+        self.goal_height = kwargs.get("goal_height", self.agent_radius * 4)
+        self.arena_size = kwargs.get("arena_size", 5)
+        self.viewer_zoom = kwargs.get("viewer_zoom", 1.7)
+
+    def define_task_properties(self, kwargs):
+        self.task_type = kwargs.get("task_type", "nav")
         # Knowledge is of shape: [2 (source, learnt), knowledge dim (eg. 3-RGB)]
         self.knowledge_shape = kwargs.get("knowledge_shape", (2, 3))
         self.multi_head = kwargs.get("multi_head", False)
@@ -201,7 +204,7 @@ class Scenario(BaseScenario):
             goal = DOTSPayloadDest(
                 name=f"goal_{i}",
                 collide=False,
-                shape=Box(length=self.agent_radius * 4, width=self.agent_radius * 4),
+                shape=Box(length=self.goal_width, width=self.goal_height),
                 color=Color.BLUE,
                 expected_knowledge_shape=3
             )
@@ -732,6 +735,10 @@ class Scenario(BaseScenario):
         # self.debug_coms_signals(agent, com_knowledge, any_in_prox, in_prox, new_mix)
         agent.state.knowledge[:, 1, :] = new_mix
 
+    def set_new_goals(self, agent: DOTSAgent):
+        # TODO: If agent has completed its goal and there are more goals to complete set goal to next available one.
+        pass
+
     def process_action(self, agent: DOTSAgent):
         if agent.task != "nav" and agent in self.agent_list["mix"]:
             if self.multi_head:
@@ -800,7 +807,7 @@ class Scenario(BaseScenario):
             #            + ",".join([f"{val}" for val in self.selected_goals[:, env_index]])
             #            + "]")
             c_goals = ("Completed Goals: ["
-                       + ",".join([f"{val}" for val in self.completed_goals[env_index]])
+                       + ",".join([f"{bool(val)}" for val in self.completed_goals[env_index]])
                        + "]")
             completed_goals = rendering.TextLine(c_goals, y=vert_offset - 15, font_size=10)
             # selected_goals = rendering.TextLine(s_goals, y=vert_offset, font_size=10)
