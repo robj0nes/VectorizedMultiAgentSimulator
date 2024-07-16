@@ -754,8 +754,8 @@ class Environment(TorchVectorizedObject):
         for entity in self.world.entities:
             self.viewer.add_onetime_list(entity.render(env_index=env_index))
 
-        # Add list of geoms to render on top of all world entities.
-        self.viewer.add_onetime_list(self.scenario.top_layer_render(env_index))
+        # # Add list of geoms to render on top of all world entities.
+        # self.viewer.add_onetime_list(self.scenario.top_layer_render(env_index))
 
         # render to display or array
         return self.viewer.render(return_rgb_array=mode == "rgb_array")
