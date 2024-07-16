@@ -64,10 +64,11 @@ class DOTSWorld(World):
 
 # TODO: Define a default action script which accounts for the DOTs action space.
 class DOTSAgent(Agent):
-    def __init__(self, name, task, render=True, knowledge_shape=None, **kwargs):
+    def __init__(self, name, task, agent_index, render=True, knowledge_shape=None, **kwargs):
         super().__init__(name, **kwargs)
         self.rewards = dict()
         self.task = task
+        self.agent_index = agent_index
         self.render_agent = render
         self.knowledge_shape = knowledge_shape
         self._state = DOTSAgentState(knowledge_shape)

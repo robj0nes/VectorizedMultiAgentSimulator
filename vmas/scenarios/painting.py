@@ -18,6 +18,8 @@ EPSILON = 1e-6
 
 
 # TODO:
+#  1. Improved goal rendering.
+#  2. Allow mix-coefficients to change after mixing. -> retrain.
 #  1. Multi-head agents (nav + mix) - Suboptimal implementation, will need lots of refactoring if it works..
 #  2. Later: Implementation assumes agent[i] and goal[i] are always connected. Does not necessarily generalise
 
@@ -107,6 +109,7 @@ class Scenario(BaseScenario):
                         collide=True if "nav" in ext else False,
                         color=Color.GREEN,
                         task=ext.strip('-'),
+                        agent_index=i,
                         render=True if "nav" in ext else False,
                         knowledge_shape=None if "nav" in ext else self.knowledge_shape,
                         silent=True if self.dim_c == 0 else False,
@@ -117,12 +120,12 @@ class Scenario(BaseScenario):
                         agent.rewards = {
                             "agent_collision": torch.zeros(batch_dim, device=device),
                             "obstacle_collision": torch.zeros(batch_dim, device=device),
-                            "position": torch.zeros(batch_dim, device=device),
+                            "shaping": torch.zeros(batch_dim, device=device),
                             "final": torch.zeros(batch_dim, device=device)
                         }
                     if "mix" in ext:
                         agent.rewards = {
-                            "mixing": torch.zeros(batch_dim, device=device),
+                            "shaping": torch.zeros(batch_dim, device=device),
                             "final": torch.zeros(batch_dim, device=device)
                         }
                     self.agent_list[ext.strip("-")].append(agent)
@@ -135,6 +138,7 @@ class Scenario(BaseScenario):
                     shape=Sphere(self.agent_radius),
                     color=Color.GREEN,
                     task=self.task_type,
+                    agent_index=i,
                     knowledge_shape=self.knowledge_shape,
                     silent=True if self.dim_c == 0 else False,
                     # TODO: Make action size > 2 to learn mixing weights.
@@ -582,9 +586,9 @@ class Scenario(BaseScenario):
 
                 shaped_dists = (agent.pos_shaping - pos_shaping) / agent.pos_shape_norm
                 agent.pos_shaping = pos_shaping
-                agent.rewards["position"] += shaped_dists[:, goal_index]
+                agent.rewards["shaping"] += shaped_dists[:, goal_index]
                 # NOTE: Below can be used if we are only searching for pos rewards once colours have been matched.
-                # agent.rewards["position"] += (shaped_dists * colour_match).sum(dim=0)
+                # agent.rewards["shaping"] += (shaped_dists * colour_match).sum(dim=0)
 
             agent.state.task_complete = dists[:, goal_index] < agent.shape.radius
             agent.rewards["final"][agent.state.task_complete] += self.final_pos_reward / self.n_agents
@@ -610,7 +614,7 @@ class Scenario(BaseScenario):
                 mix_shaping = knowledge_dists * self.mix_shaping_factor
                 shaped_mixes = (agent.mix_shaping - mix_shaping) / agent.mix_shaping_norm
                 agent.mix_shaping = mix_shaping
-                agent.rewards["mixing"] += shaped_mixes[:, goal_index]
+                agent.rewards["shaping"] += shaped_mixes[:, goal_index]
 
     def compute_collision_penalties(self, agent):
         if agent.task != "mix":
@@ -638,7 +642,7 @@ class Scenario(BaseScenario):
         if type(agent).__name__ == "DOTSAgent":
             if agent.task == "mix":
                 return {
-                    "mix_shaping": agent.rewards["mixing"],
+                    "mix_shaping": agent.rewards["shaping"],
                     "agent_final": agent.rewards["final"],
                     "final_mix_rew": self.final_mix_rew,
                     "final_reward": self.final_rew
@@ -646,7 +650,7 @@ class Scenario(BaseScenario):
 
             elif agent.task == "nav":
                 return {
-                    "nav_shaping": agent.rewards["position"],
+                    "nav_shaping": agent.rewards["shaping"],
                     "agent_final": agent.rewards["final"],
                     "final_pos_rew": self.final_pos_rew,
                     "final_reward": self.final_rew
@@ -654,7 +658,7 @@ class Scenario(BaseScenario):
 
             else:
                 return {
-                    "pos_reward": agent.rewards["position"],
+                    "pos_reward": agent.rewards["shaping"],
                     "mix_reward": agent.rewards["mixing"],
                     "agent_final": agent.rewards["final"],
                     "final_pos_rew": self.final_pos_rew,
@@ -883,8 +887,7 @@ class Scenario(BaseScenario):
                                              y=(vert_offset - (15 * (int(agent.name.split('_')[-1]) + 1))),
                                              font_size=10)
 
-            # target_goal = agent.state.target_goal[env_index]
-            target_goal = int(agent.name.split("_")[-1])
+            target_goal = agent.agent_index
             knowledge = ("learnt: ["
                          + ",".join([f"{p:.2f}" for p in agent.state.knowledge[env_index, 1, :]])
                          + "]  goal: ["
@@ -905,9 +908,9 @@ class Scenario(BaseScenario):
             c_goals = ("Completed Goals: ["
                        + ",".join([f"{val}" for val in self.completed_goals[env_index]])
                        + "]")
+            completed_goals = rendering.TextLine(c_goals, y=vert_offset - 15, font_size=10)
             # selected_goals = rendering.TextLine(s_goals, y=vert_offset, font_size=10)
-            if agent == self.all_agents[0]:
-                completed_goals = rendering.TextLine(c_goals, y=vert_offset - 15, font_size=10)
+            if agent.agent_index == 0:
                 geoms.append(completed_goals)
 
             geoms.append(coms_line)
