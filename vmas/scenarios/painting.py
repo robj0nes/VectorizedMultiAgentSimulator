@@ -787,30 +787,34 @@ class Scenario(BaseScenario):
     def update_goal_selection(self, agent, task_complete):
         # TODO: Discard any next goals > num goals
         # Get the next goal index by the count of currently selected goals.
-        next_goal_index = torch.sum(self.selected_goals[task_complete], dim=1)
+        next_goal_index = torch.sum(self.selected_goals, dim=1)
 
         # Zero any completion dimensions where the next goal index exceeds the num goals.
         task_complete[next_goal_index >= self.n_goals] = False
+        next_goal_index = next_goal_index[task_complete]
 
-        # Update the agent target
-        agent.state.target_goal_index[task_complete] = next_goal_index
-        agent.counter_part.state.target_goal_index[task_complete] = next_goal_index
+        # Check we still have a task completion signal
+        if task_complete.any():
+            # Update the agent target
+            agent.state.target_goal_index[task_complete] = next_goal_index
+            agent.counter_part.state.target_goal_index[task_complete] = next_goal_index
 
-        # Build a tensor stack of [update_dims, n_goals] where the newly selected goal is True
-        new_goal_selections = torch.stack(
-            [torch.stack(
-                [torch.tensor(True) if i == next_goal_index[j] else torch.tensor(False) for i in range(self.n_goals)]
-            ) for j in range(len(next_goal_index))]
-        )
+            # Build a tensor stack of [update_dims, n_goals] where the newly selected goal is True
+            new_goal_selections = torch.stack(
+                [torch.stack(
+                    [torch.tensor(True) if i == next_goal_index[j]
+                     else torch.tensor(False) for i in range(self.n_goals)]
+                ) for j in range(len(next_goal_index))]
+            )
 
-        # Update selected goals with the newly selected goals by logical OR along the batch dim.
-        self.selected_goals[task_complete] = (
-            torch.logical_or(self.selected_goals[task_complete], new_goal_selections)
-        )
+            # Update selected goals with the newly selected goals by logical OR along the batch dim.
+            self.selected_goals[task_complete] = (
+                torch.logical_or(self.selected_goals[task_complete], new_goal_selections)
+            )
 
-        # Reset the agent task completion state
-        agent.state.task_complete[task_complete] = False
-        agent.counter_part.state.task_complete[task_complete] = False
+            # Reset the agent task completion state
+            agent.state.task_complete[task_complete] = False
+            agent.counter_part.state.task_complete[task_complete] = False
 
     def process_action(self, agent: DOTSAgent):
         self.set_new_goals(agent)
