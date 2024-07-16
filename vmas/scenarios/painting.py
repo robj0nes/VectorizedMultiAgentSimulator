@@ -906,14 +906,15 @@ class Scenario(BaseScenario):
                        + ",".join([f"{val}" for val in self.completed_goals[env_index]])
                        + "]")
             # selected_goals = rendering.TextLine(s_goals, y=vert_offset, font_size=10)
-            completed_goals = rendering.TextLine(c_goals, y=vert_offset - 15, font_size=10)
+            if agent == self.all_agents[0]:
+                completed_goals = rendering.TextLine(c_goals, y=vert_offset - 15, font_size=10)
+                geoms.append(completed_goals)
 
             geoms.append(coms_line)
             geoms.append(out_coms_line)
             geoms.append(action_line)
             geoms.append(knowledge_line)
             # geoms.append(selected_goals)
-            geoms.append(completed_goals)
 
     def render_nav_actions(self, agent, env_index, geoms):
         if agent.action.u is not None:
