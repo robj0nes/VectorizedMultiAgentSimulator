@@ -148,6 +148,8 @@ class DOTSAgentState(AgentState):
         self.agent_index = agent_index
         self.knowledge_shape = knowledge_shape
 
+        self._reward_multiplier = None
+
         # Has agent completed primary task and is now seeking goal.
         self._task_complete = None
 
@@ -156,6 +158,23 @@ class DOTSAgentState(AgentState):
 
         # Defines the agent knowledge(s)
         self._knowledge = None
+
+
+    @property
+    def reward_multiplier(self):
+        return self._reward_multiplier
+
+    @reward_multiplier.setter
+    def reward_multiplier(self, reward_multiplier: Tensor):
+        assert (
+                self._batch_dim is not None and self._device is not None
+        ), "First add an entity to the world before setting its state"
+        assert (
+                reward_multiplier.shape[0] == self._batch_dim
+        ), f"Internal state must match batch dim, got {reward_multiplier.shape[0]}, expected {self._batch_dim}"
+
+        self._reward_multiplier = reward_multiplier.to(self._device)
+
 
     @property
     def target_goal_index(self):
@@ -221,12 +240,20 @@ class DOTSAgentState(AgentState):
                 self.target_goal_index[:] = self.agent_index
             else:
                 self.target_goal_index[env_index] = self.agent_index
+
+        if self.reward_multiplier is not None:
+            if env_index is None:
+                self.reward_multiplier[:] = 1
+            else:
+                self.reward_multiplier[env_index] = 1
+
         super()._reset(env_index)
 
     @override(AgentState)
     def _spawn(self, dim_c: int, dim_p: int):
         self.task_complete = torch.zeros(self.batch_dim, device=self.device, dtype=torch.bool)
         self.target_goal_index = torch.zeros(self.batch_dim, device=self.device, dtype=torch.long)
+        self.reward_multiplier = torch.zeros(self.batch_dim, device=self.device, dtype=torch.int)
 
         if self.knowledge_shape is not None:
             self.knowledge = torch.zeros(

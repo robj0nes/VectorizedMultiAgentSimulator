@@ -14,10 +14,9 @@ EPSILON = 1e-6
 
 
 # TODO:
-#  1. Multi-goal!
-#  2. Later: Implementation assumes agent[i] and goal[i] are always connected. Does not necessarily generalise
+#  1. Later: Implementation assumes agent[i] and goal[i] are always connected. Does not necessarily generalise
 
-def get_distinct_color_list(n_cols, device: torch.device, exclusions=None):
+def get_distinct_color_list(n_cols, device: torch.device):
     opts = sns.color_palette(palette="Set2")
     return torch.stack([torch.tensor(opts[x], device=device, dtype=torch.float32) for x in
                         random.sample(range(0, len(opts)), n_cols)])
@@ -77,9 +76,9 @@ class Scenario(BaseScenario):
     def define_world_properties(self, kwargs):
         self.n_agents = kwargs.get("n_agents", 4)
         self.n_goals = kwargs.get("n_goals", 4)
-        self.agent_radius = kwargs.get("agent_radius", 0.2)
-        self.goal_width = kwargs.get("goal_width", self.agent_radius * 4)
-        self.goal_height = kwargs.get("goal_height", self.agent_radius * 4)
+        self.agent_radius = kwargs.get("agent_radius", 0.3)
+        self.goal_width = kwargs.get("goal_width", self.agent_radius * 3)
+        self.goal_height = kwargs.get("goal_height", self.agent_radius * 3)
         self.arena_size = kwargs.get("arena_size", 5)
         self.viewer_zoom = kwargs.get("viewer_zoom", 1.7)
 
@@ -112,9 +111,11 @@ class Scenario(BaseScenario):
         self.pos_shaping_factor = kwargs.get("pos_shaping_factor", 1.0)
         self.mix_shaping = kwargs.get("mix_shaping", False)
         self.mix_shaping_factor = kwargs.get("mix_shaping_factor", 1.0)
+        self.cumulative_rewards = kwargs.get("cumulative_rewards", False)
         self.final_pos_reward = kwargs.get("final_pos_reward", 0.05)
         self.final_mix_reward = kwargs.get("final_mix_reward", 0.05)
         self.per_agent_reward = kwargs.get("per_agent_reward", False)
+        self.goal_completion_reward = kwargs.get("goal_completion_reward", 0.1)
         self.final_rew = torch.zeros(batch_dim, device=device, dtype=torch.float32)
         self.final_pos_rew = self.final_rew.clone()
         self.final_mix_rew = self.final_rew.clone()
@@ -152,6 +153,7 @@ class Scenario(BaseScenario):
                     if "mix" in ext:
                         agent.rewards = {
                             "shaping": torch.zeros(batch_dim, device=device),
+                            "cumulative": torch.zeros(batch_dim, device=device),
                             "final": torch.zeros(batch_dim, device=device)
                         }
                     self.agent_list[ext.strip("-")].append(agent)
@@ -219,27 +221,20 @@ class Scenario(BaseScenario):
             self.goals.append(goal)
             world.add_landmark(goal)
 
-    def premix_paints(self, small, large, device):
+    def premix_paints(self, large, device):
+        """ Takes the largest of n_agents, or n_goals and forms unique pairs,
+        such that each agent has a unique knowledge-match with a goal.
+        Used for navigation-only versions of the task."""
         large_knowledge = torch.stack(
             [
                 get_distinct_color_list(large, device) for _ in range(self.world.batch_dim)
             ]
         )
 
-        # ran_ints = [
-        #     random.sample(range(large_knowledges.shape[1]), small) for _ in range(self.world.batch_dim)
-        # ]
-
-        # TODO: Test nav with random agent-goal assignments. Make sure that observations are
-        #  based on colour match, not agent index.
         small_knowledge = torch.stack(
             [
                 torch.stack(
                     [
-                        # Random goal assignment
-                        # large_knowledges[j][i] for i in ran_ints[j]
-
-                        # Indexed goal assignment
                         large_knowledge[j][i] for i in range(large_knowledge.shape[1])
                     ]
                 )
@@ -251,11 +246,11 @@ class Scenario(BaseScenario):
             for sp in small_knowledge[i]:
                 assert (
                         sp in large_knowledge[i]
-                ), "Trying to assign matching knowledges to goals, but found a mismatch"
+                ), "Trying to assign matching knowledge to goals, but found a mismatch"
 
         return small_knowledge, large_knowledge
 
-    # TODO: Have some check to ensure all goal mixes are unique.
+    # TODO: Have some check to ensure all goal mixes are unique?
     def unmixed_paints(self, device):
         if self.random_knowledge:
             # Generate a set of random knowledge vectors K (one per agent) such that sum over all knowledge K_i > 1.
@@ -305,9 +300,9 @@ class Scenario(BaseScenario):
     def random_paint_generator(self, device: torch.device):
         if self.task_type == 'nav':
             if self.n_goals <= self.n_agents:
-                goal_knowledge, agent_knowledge = self.premix_paints(self.n_goals, self.n_agents, device)
+                goal_knowledge, agent_knowledge = self.premix_paints(self.n_agents, device)
             else:
-                agent_knowledge, goal_knowledge = self.premix_paints(self.n_agents, self.n_goals, device)
+                agent_knowledge, goal_knowledge = self.premix_paints(self.n_goals, device)
         else:
             agent_knowledge, goal_knowledge = self.unmixed_paints(device)
         return agent_knowledge, goal_knowledge
@@ -329,8 +324,12 @@ class Scenario(BaseScenario):
             knowledge = agent_knowledge[:, i, :].unsqueeze(1).repeat(1, 2, 1)
             if env_index is None:
                 agent.set_knowledge(knowledge, batch_index=env_index)
+                # NOTE: Testing cumulative rewards on mix agents.
+                agent.rewards["cumulative"][:] = 0
             else:
                 agent.set_knowledge(knowledge[env_index], batch_index=env_index)
+                # NOTE: Testing cumulative rewards on mix agents.
+                agent.rewards["cumulative"][env_index] = 0
 
         for i, goal in enumerate(self.goals):
             # Goal should be of shape: [Batch dim, RGB]
@@ -358,53 +357,60 @@ class Scenario(BaseScenario):
         # Preliminary position and mix shaping to all goals.
         # Clone distances to use as normalisation during reward computation.
         for agent in self.agent_list["nav"]:
-            if env_index is None:
-                agent.pos_shaping = (
-                        torch.stack(
-                            [torch.linalg.vector_norm((agent.state.pos - goal.state.pos), dim=-1) for goal in
-                             self.goals], 1)
-                        * self.pos_shaping_factor)
-                agent.pos_shape_norm = agent.pos_shaping.clone() + EPSILON
-            else:
-                agent.pos_shaping[env_index] = (
-                        torch.stack(
-                            [
-                                torch.linalg.vector_norm(
-                                    (agent.state.pos[env_index] - goal.state.pos[env_index]),
-                                    dim=-1)
-                                for goal in self.goals
-                            ]
-                        )
-                        * self.pos_shaping_factor
-                )
-                agent.pos_shape_norm[env_index] = agent.pos_shaping[env_index] + EPSILON
+            self.init_pos_shaping(agent, env_index)
 
         for agent in self.agent_list["mix"]:
-            if env_index is None:
-                agent.mix_shaping = (
-                        torch.stack(
-                            [
-                                torch.linalg.vector_norm(
-                                    (agent.state.knowledge[:, 1, :] - goal.state.expected_knowledge),
-                                    dim=-1)
-                                for goal in self.goals
-                            ], 1
-                        )
-                        * self.mix_shaping_factor)
-                agent.mix_shaping_norm = agent.mix_shaping.clone() + EPSILON
-            else:
-                agent.mix_shaping[env_index] = (
-                        torch.stack(
-                            [
-                                torch.linalg.vector_norm(
-                                    (agent.state.knowledge[env_index, 1, :] - goal.state.expected_knowledge[env_index]),
-                                    dim=-1)
-                                for goal in self.goals
-                            ])
-                        * self.mix_shaping_factor)
-                agent.mix_shaping_norm[env_index] = agent.mix_shaping[env_index] + EPSILON
+            self.init_mix_shaping(agent, env_index)
+
+    def init_mix_shaping(self, agent, env_index=None):
+        if env_index is None:
+            agent.mix_shaping = (
+                    torch.stack(
+                        [
+                            torch.linalg.vector_norm(
+                                (agent.state.knowledge[:, 1, :] - goal.state.expected_knowledge),
+                                dim=-1)
+                            for goal in self.goals
+                        ], 1
+                    )
+                    * self.mix_shaping_factor)
+            agent.mix_shaping_norm = agent.mix_shaping.clone() + EPSILON
+        else:
+            agent.mix_shaping[env_index] = (
+                    torch.stack(
+                        [
+                            torch.linalg.vector_norm(
+                                (agent.state.knowledge[env_index, 1, :] - goal.state.expected_knowledge[env_index]),
+                                dim=-1)
+                            for goal in self.goals
+                        ])
+                    * self.mix_shaping_factor)
+            agent.mix_shaping_norm[env_index] = agent.mix_shaping[env_index] + EPSILON
+
+    def init_pos_shaping(self, agent, env_index=None):
+        if env_index is None:
+            agent.pos_shaping = (
+                    torch.stack(
+                        [torch.linalg.vector_norm((agent.state.pos - goal.state.pos), dim=-1) for goal in
+                         self.goals], 1)
+                    * self.pos_shaping_factor)
+            agent.pos_shaping_norm = agent.pos_shaping.clone() + EPSILON
+        else:
+            agent.pos_shaping[env_index] = (
+                    torch.stack(
+                        [
+                            torch.linalg.vector_norm(
+                                (agent.state.pos[env_index] - goal.state.pos[env_index]),
+                                dim=-1)
+                            for goal in self.goals
+                        ]
+                    )
+                    * self.pos_shaping_factor
+            )
+            agent.pos_shaping_norm[env_index] = agent.pos_shaping[env_index] + EPSILON
 
     def reset_world_at(self, env_index: int = None):
+        # TODO: Can we add a final render frame here?
         self.reset_agents(env_index)
         self.world.reset_map(env_index)
 
@@ -495,22 +501,30 @@ class Scenario(BaseScenario):
             ]
 
         else:
+            # Stack truth values for an agents target goal index across num goals.
+            target_goals = torch.stack(
+                [agent.state.target_goal_index == i for i in range(self.n_goals)], dim=1)
+
             if agent.task == "mix":
-                # Goal obs is just the distance from expected knowledge.
-                goals = torch.cat(
-                    [self.goals[agent.agent_index].state.expected_knowledge - agent.state.knowledge[:, 1, :]]
-                )
+                # Goal obs is relative distance from expected knowledge.
+                all_goal_dists = torch.stack(
+                    [g.state.expected_knowledge - agent.state.knowledge[:, 1, :] for g in self.goals]
+                    , dim=1)
+                goals = torch.cat([all_goal_dists[target_goals]], dim=-1)
             elif agent.task == "nav":
                 # Goal obs is relative position.
-                goals = torch.cat(
-                    [self.goals[agent.agent_index].state.pos - agent.state.pos],
-                    dim=-1)
+                all_goal_dists = torch.stack([g.state.pos - agent.state.pos for g in self.goals], dim=1)
+                goals = torch.cat([all_goal_dists[target_goals]], dim=-1)
             else:
+                all_goal_dists = torch.stack([g.state.pos - agent.state.pos for g in self.goals], dim=1)
+                all_goal_knowledge = torch.stack(
+                    [g.state.expected_knowledge - agent.state.knowledge[:, 1, :] for g in self.goals]
+                    , dim=1)
                 # Goal obs is relative position and knowledge.
                 goals = torch.cat(
                     [
-                        self.goals[agent.agent_index].state.pos - agent.state.pos,
-                        self.goals[agent.agent_index].state.expected_knowledge
+                        all_goal_dists[target_goals],
+                        all_goal_knowledge[target_goals]
                     ],
                     dim=-1)
 
@@ -526,7 +540,8 @@ class Scenario(BaseScenario):
                 self.reset_final_rewards()
 
             for reward in agent.rewards.keys():
-                agent.rewards[reward][:] = 0
+                if reward != "cumulative":
+                    agent.rewards[reward][:] = 0
 
             self.compute_collision_penalties(agent)
 
@@ -537,38 +552,33 @@ class Scenario(BaseScenario):
                 self.compute_final_rewards()
 
             # Only award final reward if both mix and pos are completed.
-            self.final_rew[self.final_rew != self.final_pos_reward + self.final_mix_reward] = 0
+            # self.final_rew[self.final_rew != self.final_pos_reward + self.final_mix_reward] = 0
 
             if agent.task == "nav":
-                return (torch.stack([agent.rewards[r] for r in agent.rewards.keys()], dim=0).sum(dim=0)
+                return (torch.stack([agent.rewards[r] * agent.state.reward_multiplier
+                                     for r in agent.rewards.keys()], dim=0).sum(dim=0)
                         + self.final_pos_rew + self.final_rew)
 
             elif agent.task == "mix":
-                return (torch.stack([agent.rewards[r] for r in agent.rewards.keys()], dim=0).sum(dim=0)
-                        + self.final_mix_rew + self.final_rew)
+                return (torch.stack([agent.rewards[r] * agent.state.reward_multiplier
+                                     for r in agent.rewards.keys()], dim=0).sum(dim=0)
+                        + self.final_mix_rew + self.final_rew) * agent.state.reward_multiplier
 
     def compute_final_rewards(self):
-        for a in self.agent_list['nav']:
-            self.final_pos_rew += a.rewards["final"]
-        if self.per_agent_reward:
-            # Final reward is proportional to num agents who have reached their goal.
-            self.final_rew += self.final_pos_rew
-        else:
-            # Zero any batch dim when one or more agents have not reached their goal.
-            self.final_pos_rew[self.final_pos_rew < self.final_pos_reward - 0.01] = 0
-            # Add all_on_goal reward to batch dims when all agents have reached their goals.
-            self.final_rew[self.final_pos_rew > 0] += self.final_pos_reward
-        for a in self.agent_list['mix']:
-            # Seeking goal should be {0, 1} so multiply by total mixing reward / num agents
-            self.final_mix_rew += a.state.task_complete * (self.final_mix_reward / self.n_agents)
-        if self.per_agent_reward:
-            # Final reward is proportional to num agents who have reached their goal.
-            self.final_rew += self.final_mix_rew
-        else:
-            # Zero any batch dim when one or more agents have not mixed.
-            self.final_mix_rew[self.final_mix_rew < self.final_mix_reward - 0.01] = 0
-            # Add all_mixed reward to batch dims when all agents have mixed the correct solution.
-            self.final_rew[self.final_mix_rew > 0] += self.final_mix_reward
+        # Global reward for goal completion?
+        self.final_rew += self.completed_goals.sum(dim=1) * self.goal_completion_reward
+
+        nav_agent_completion = torch.stack(
+            [agent.state.task_complete for agent in self.agent_list['nav']], dim=1)
+        mix_agent_completion = torch.stack(
+            [agent.state.task_complete for agent in self.agent_list['mix']], dim=1)
+
+        self.final_pos_rew[torch.all(nav_agent_completion, dim=1)] = self.final_pos_reward
+        self.final_mix_rew[torch.all(mix_agent_completion, dim=1)] = self.final_mix_reward
+
+        both_complete = torch.logical_and(torch.all(nav_agent_completion, dim=1),
+                                          torch.all(mix_agent_completion, dim=1))
+        self.final_rew[both_complete] += self.final_pos_reward + self.final_mix_reward
 
     def reset_final_rewards(self):
         self.final_pos_rew[:] = 0
@@ -593,7 +603,7 @@ class Scenario(BaseScenario):
             if self.pos_shaping:
                 # Perform position shaping on goal distances
                 pos_shaping = dists * self.pos_shaping_factor
-                shaped_dists = (agent.pos_shaping - pos_shaping) / agent.pos_shape_norm
+                shaped_dists = (agent.pos_shaping - pos_shaping) / agent.pos_shaping_norm
                 agent.pos_shaping = pos_shaping
                 agent.rewards["shaping"] += shaped_dists[target_goals]
 
@@ -608,6 +618,10 @@ class Scenario(BaseScenario):
                     torch.linalg.vector_norm((agent.state.knowledge[:, 1, :] - goal.state.expected_knowledge), dim=1)
                     for goal in self.goals
                 ], 1)
+
+            # OLD
+            # agent.state.task_complete = torch.logical_or(
+            #     agent.state.task_complete, knowledge_dists[target_goals] < self.mixing_thresh)
 
             agent.state.task_complete = knowledge_dists[target_goals] < self.mixing_thresh
             agent.rewards["final"][agent.state.task_complete] += self.final_mix_reward / self.n_agents
@@ -645,25 +659,26 @@ class Scenario(BaseScenario):
         if type(agent).__name__ == "DOTSAgent":
             if agent.task == "mix":
                 return {
-                    "mix_shaping": agent.rewards["shaping"],
-                    "agent_final": agent.rewards["final"],
+                    "mix_shaping": agent.rewards["shaping"] * agent.state.reward_multiplier,
+                    "cumulative": agent.rewards["cumulative"] * agent.state.reward_multiplier,
+                    "agent_final": agent.rewards["final"] * agent.state.reward_multiplier,
                     "final_mix_rew": self.final_mix_rew,
                     "final_reward": self.final_rew
                 }
 
             elif agent.task == "nav":
                 return {
-                    "nav_shaping": agent.rewards["shaping"],
-                    "agent_final": agent.rewards["final"],
+                    "nav_shaping": agent.rewards["shaping"] * agent.state.reward_multiplier,
+                    "agent_final": agent.rewards["final"] * agent.state.reward_multiplier,
                     "final_pos_rew": self.final_pos_rew,
                     "final_reward": self.final_rew
                 }
 
             else:
                 return {
-                    "pos_reward": agent.rewards["shaping"],
-                    "mix_reward": agent.rewards["mixing"],
-                    "agent_final": agent.rewards["final"],
+                    "pos_reward": agent.rewards["shaping"] * agent.state.reward_multiplier,
+                    "mix_reward": agent.rewards["mixing"] * agent.state.reward_multiplier,
+                    "agent_final": agent.rewards["final"] * agent.state.reward_multiplier,
                     "final_pos_rew": self.final_pos_rew,
                     "final_mix_rew": self.final_mix_rew,
                     "final_reward": self.final_rew
@@ -690,7 +705,7 @@ class Scenario(BaseScenario):
             request_mix = request_mix.unsqueeze(0).repeat(self.n_agents - 1, 1)
 
         in_prox = (((torch.stack(
-            [torch.linalg.norm(agent.state.pos - other.state.pos, dim=1)
+            [torch.linalg.vector_norm(agent.state.pos - other.state.pos, dim=1)
              for other in self.agent_list['mix'] if other != agent]))
                     < self.coms_proximity) * request_mix)
         any_in_prox = torch.logical_or(*in_prox)
@@ -704,7 +719,8 @@ class Scenario(BaseScenario):
             knowledge_dims = self.knowledge_shape[-1]
             # # NOTE: DEBUGGING Interactive Render
             # agent.action.u[:, -knowledge_dims:] = (self.goals[
-            #                                            agent.state.target_goal_index[0]].state.expected_knowledge * 2) - 1
+            #                                            agent.state.target_goal_index[
+            #                                                0]].state.expected_knowledge * 2) - 1
             mix_coefficients = (agent.action.u[:, -knowledge_dims:] + 1) / 2  # Shift from [-1, 1] to [0,1]
         else:
             # TODO: This does not account for n_goals > n_agents
@@ -754,7 +770,6 @@ class Scenario(BaseScenario):
         # self.debug_coms_signals(agent, com_knowledge, any_in_prox, in_prox, new_mix)
         agent.state.knowledge[:, 1, :] = new_mix
 
-
     def set_new_goals(self, agent: DOTSAgent):
         # We only want to do this once for multi-head agents
         if agent.task == "nav":
@@ -785,7 +800,6 @@ class Scenario(BaseScenario):
             self.goals[i].state.solved[:] = self.completed_goals[:, i]
 
     def update_goal_selection(self, agent, task_complete):
-        # TODO: Discard any next goals > num goals
         # Get the next goal index by the count of currently selected goals.
         next_goal_index = torch.sum(self.selected_goals, dim=1)
 
@@ -798,6 +812,10 @@ class Scenario(BaseScenario):
             # Update the agent target
             agent.state.target_goal_index[task_complete] = next_goal_index
             agent.counter_part.state.target_goal_index[task_complete] = next_goal_index
+            # NOTE: Testing adding a cumulative reward to the mixing agent to encourage re-mixing for new goal
+            #   Might want to do this on task completion instead as the final goal doesn't active this conditional?
+            if self.cumulative_rewards:
+                agent.counter_part.rewards['cumulative'] += agent.counter_part.rewards['final']
 
             # Build a tensor stack of [update_dims, n_goals] where the newly selected goal is True
             new_goal_selections = torch.stack(
@@ -812,9 +830,15 @@ class Scenario(BaseScenario):
                 torch.logical_or(self.selected_goals[task_complete], new_goal_selections)
             )
 
+            # Increase the reward multiplier.
+            agent.state.reward_multiplier[task_complete] += 1
+            agent.counter_part.state.reward_multiplier[task_complete] += 1
             # Reset the agent task completion state
             agent.state.task_complete[task_complete] = False
             agent.counter_part.state.task_complete[task_complete] = False
+            # Reset shaping normalisation
+            agent.pos_shaping_norm[task_complete] = agent.pos_shaping[task_complete].clone()
+            agent.counter_part.mix_shaping_norm[task_complete] = agent.counter_part.mix_shaping[task_complete].clone()
 
     def process_action(self, agent: DOTSAgent):
         self.set_new_goals(agent)
@@ -838,12 +862,13 @@ class Scenario(BaseScenario):
 
     def render_mix_actions(self, agent, env_index, geoms):
         if agent.action.u is not None:
+            name = agent.name.replace("-agent", "")
             incoming_coms = ("coms_in: ["
                              + ",".join([f"{c:.2f}" for c in agent.incoming_coms[env_index]])
                              + "]")
 
-            vert_offset = 650 - (30 * self.n_agents) - 100 - (15 * self.n_agents)
-            coms_line = rendering.TextLine(f'{agent.name} {incoming_coms}',
+            vert_offset = 630 - (30 * self.n_agents) - 100 - (15 * self.n_agents)
+            coms_line = rendering.TextLine(f'{name} {incoming_coms}',
                                            y=(vert_offset - (15 * (int(agent.name.split('_')[-1]) + 1))),
                                            font_size=10)
 
@@ -854,7 +879,7 @@ class Scenario(BaseScenario):
                              + "]"
                              )
             vert_offset -= ((15 * self.n_agents) + 10)
-            out_coms_line = rendering.TextLine(f'{agent.name} {outgoing_coms}',
+            out_coms_line = rendering.TextLine(f'{name} {outgoing_coms}',
                                                y=(vert_offset - (15 * (int(agent.name.split('_')[-1]) + 1))),
                                                font_size=10)
 
@@ -862,7 +887,7 @@ class Scenario(BaseScenario):
                       + ",".join([f"{(a + 1) / 2:.2f}" for a in agent.action.u[env_index][-self.knowledge_shape[-1]:]])
                       + "]")
             vert_offset -= ((15 * self.n_agents) + 10)
-            action_line = rendering.TextLine(f'{agent.name} {action}',
+            action_line = rendering.TextLine(f'{name} {action}',
                                              y=(vert_offset - (15 * (int(agent.name.split('_')[-1]) + 1))),
                                              font_size=10)
 
@@ -872,10 +897,12 @@ class Scenario(BaseScenario):
                          + "]  goal: ["
                          + ",".join(
                         [f"{g:.2f}" for g in self.goals[target_goal].state.expected_knowledge[env_index]])
-                         + "]"
+                         + "]  dist: "
+                         + f"""{torch.linalg.vector_norm(self.goals[target_goal].state.expected_knowledge[env_index] -
+                                                         agent.state.knowledge[env_index, 1, :]):.2f}"""
                          )
             vert_offset -= ((15 * self.n_agents) + 10)
-            knowledge_line = rendering.TextLine(f'{agent.name} {knowledge}',
+            knowledge_line = rendering.TextLine(f'{name} {knowledge}',
                                                 y=(vert_offset - (15 * (int(agent.name.split('_')[-1]) + 1))),
                                                 font_size=10)
 
@@ -900,17 +927,18 @@ class Scenario(BaseScenario):
 
     def render_nav_actions(self, agent, env_index, geoms):
         if agent.action.u is not None:
+            name = agent.name.replace("-agent", "")
             action = ("vel: ["
                       + ",".join([f"{a:.2f}" for a in agent.action.u[env_index][:2]])
                       + "]")
 
-            vert_offset = 650 - (30 * self.n_agents) - 20
-            target_goal = rendering.TextLine(f'{agent.name} target: {agent.state.target_goal_index[env_index]}',
+            vert_offset = 630 - (30 * self.n_agents) - 20
+            target_goal = rendering.TextLine(f'{name} target: {agent.state.target_goal_index[env_index]}',
                                              y=(vert_offset - (15 * (int(agent.name.split('_')[-1]) + 1))),
                                              font_size=10)
 
             vert_offset -= ((15 * self.n_agents) + 20)
-            action_line = rendering.TextLine(f'{agent.name} {action}',
+            action_line = rendering.TextLine(f'{name} {action}',
                                              y=(vert_offset - (15 * (int(agent.name.split('_')[-1]) + 1))),
                                              font_size=10)
 
@@ -918,10 +946,13 @@ class Scenario(BaseScenario):
             geoms.append(action_line)
 
     def render_rewards(self, agent, env_index, geoms):
-        rew_components = torch.stack([agent.rewards[r][env_index] for r in agent.rewards.keys()], dim=0)
+        name = agent.name.replace("-agent", "")
+        rew_multiplier = agent.state.reward_multiplier[env_index]
+        rew_components = torch.stack([agent.rewards[r][env_index] * agent.state.reward_multiplier[env_index]
+                                      for r in agent.rewards.keys()], dim=0)
         total_rew = rew_components.sum(dim=0)
-        init_pos = 665 if "nav" in agent.task else 650
-        reward = rendering.TextLine(f'{agent.name} rew: '
+        init_pos = 635 if "nav" in agent.task else 620
+        reward = rendering.TextLine(f'{name} {rew_multiplier}x rew: '
                                     + ",".join([f'{r:.2f}' for r in rew_components])
                                     + f' = {total_rew:.2f}', x=0,
                                     y=(init_pos - (30 * (int(agent.name.split('_')[-1]) + 1))),
@@ -931,7 +962,14 @@ class Scenario(BaseScenario):
         if agent == self.world.agents[-1]:
             final_rew = rendering.TextLine(f'final rew: {self.final_rew[env_index]:.2f}',
                                            y=650, font_size=10)
+            final_pos_rew = rendering.TextLine(f'final pos rew: {self.final_pos_rew[env_index]:.2f}',
+                                               y=635, font_size=10)
+            final_mix_rew = rendering.TextLine(f'final mix rew: {self.final_mix_rew[env_index]:.2f}',
+                                               y=620, font_size=10)
+
             geoms.append(final_rew)
+            geoms.append(final_pos_rew)
+            geoms.append(final_mix_rew)
 
 
 if __name__ == '__main__':
