@@ -1,5 +1,7 @@
 import time
 
+import torch
+
 from vmas import make_env
 from vmas.simulator.utils import save_video
 
@@ -38,6 +40,11 @@ def run_painting(
 
     dict_spaces = True  # Weather to return obs, rewards, and infos as dictionaries with agent names
     # (by default they are lists of len # of agents)
+    model = torch.load('/Users/vd20433/FARSCOPE/FirstYearProject/Checkpoints/Full Task/pre-trained_3A-3G/checkpoints/pre-trained_checkpoint_6000000.pt')
+    # Set up loss modules.
+    losses = {}
+    for group in ["nav_agents", "mix_agents"]:
+        losses[group].load_state_dict(model[f"loss_{group}"])
 
     env = make_env(
         scenario=scenario_name,
