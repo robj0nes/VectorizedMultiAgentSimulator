@@ -17,7 +17,7 @@ __all__ = [
     "mpe_scenarios",
 ]
 
-__version__ = "1.4.1"
+__version__ = "1.4.2"
 
 scenarios = sorted(
     [
@@ -43,6 +43,7 @@ scenarios = sorted(
         "navigation",
         "sampling",
         "wind_flocking",
+        "road_traffic",
     ]
 )
 """List of the vmas scenarios (excluding MPE and debug)"""
