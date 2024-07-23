@@ -90,11 +90,11 @@ class Scenario(BaseScenario):
         self.multi_head = kwargs.get("multi_head", False)
         self.observation_proximity = kwargs.get("observation_proximity", self.arena_size)
         self.observe_all_goals = kwargs.get("observe_all_goals", False)
-        self.observe_other_agents = kwargs.get("observe_other_agents", True)
+        self.observe_other_agents = kwargs.get("observe_other_agents", False)
         self.isolated_coms = kwargs.get("isolated_coms", False)
         self.coms_proximity = kwargs.get("coms_proximity", self.arena_size)
         self.learn_coms = kwargs.get("learn_coms", True)
-        self.mixing_thresh = kwargs.get("mixing_thresh", 0.01)
+        self.mixing_thresh = kwargs.get("mixing_thresh", 0.1)
         self.learn_mix = kwargs.get("learn_mix", True)
         # Size of coms = No coms if only testing navigation,
         #   else: 1-D mixing intent + N-D knowledge.
@@ -182,6 +182,7 @@ class Scenario(BaseScenario):
                 agent.rewards = {
                     "agent_collision": torch.zeros(batch_dim, device=device),
                     "obstacle_collision": torch.zeros(batch_dim, device=device),
+                    "cumulative": torch.zeros(batch_dim, device=device),
                     "position": torch.zeros(batch_dim, device=device),
                     "mixing": torch.zeros(batch_dim, device=device),
                     "final": torch.zeros(batch_dim, device=device)
@@ -471,9 +472,9 @@ class Scenario(BaseScenario):
 
         else:
             if self.learn_coms:
-                # Collect communications from other agents.
+                # Collect communications from other agents. Ignore mixing request as that is an internal condition
                 agent_coms = torch.stack(
-                    [a.state.c for a in self.agent_list['mix'] if a != agent]
+                    [a.state.c[:, -self.knowledge_shape[1]:] for a in self.agent_list['mix'] if a != agent]
                 )
             else:
                 # Assume agents communicate correctly:
@@ -754,6 +755,8 @@ class Scenario(BaseScenario):
 
             # Update the agent learnt knowledge with the weighted mix of the others' communicated knowledge.
             for i in range(in_prox.shape[0]):
+                # in_prox[i] is the batch dims when 'other agent' i is in proximity.
+                # com_knowledge[i, ....] is the incoming coms from 'other agent' i
                 new_mix[in_prox[i], :] += com_knowledge[i, in_prox[i], :] * mix_coefficients[in_prox[i], :]
 
             # Add agents own source knowledge along any dim where a mix has been made.
