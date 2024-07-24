@@ -4,7 +4,7 @@ import torch
 import seaborn as sns
 
 from vmas import render_interactively
-from vmas.simulator import rendering
+# from vmas.simulator import rendering
 from vmas.simulator.core import Sphere, World, Box
 from vmas.simulator.dots_core import DOTSWorld, DOTSAgent, DOTSComsNetwork, DOTSPayloadDest
 from vmas.simulator.scenario import BaseScenario
@@ -433,7 +433,7 @@ class Scenario(BaseScenario):
                     ), 0, 1
                 )
             else:
-                other_agents = torch.empty(0)
+                other_agents = torch.empty(0, device=self.world.device)
 
             task_obs = [self.compute_goal_observations(agent)]
 

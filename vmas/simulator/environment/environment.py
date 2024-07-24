@@ -466,7 +466,7 @@ class Environment(TorchVectorizedObject):
             action = action.detach()
         action = action.to(self.device)
         if action.isnan().any():
-            print()
+            print(f"{agent.name} has nan action: {action}")
         assert not action.isnan().any()
         agent.action.u = torch.zeros(
             self.batch_dim,
