@@ -696,10 +696,8 @@ class Scenario(BaseScenario):
         Args:
             agent: The agent requesting the knowledge mix.
         """
-        # Establish where a request is true along the batch dim,
-        #  and the agent hasn't already produced the correct solution.
-        # request_mix = torch.logical_and(agent.action.c[:, 0] > 0.5, ~agent.state.task_complete.squeeze())
-        # NOTE: Removed freeze on task completion.
+        # Establish where a request is true (i.e. > 0.5) along the batch dim
+        # TODO: Soft max this instead?
         request_mix = agent.action.c[:, 0] > 0.5
         if not self.isolated_coms:
             #   Copy for (n_agents - 1) to simplify tensor calcs.
@@ -776,12 +774,6 @@ class Scenario(BaseScenario):
     def set_new_goals(self, agent: DOTSAgent):
         # We only want to do this once for multi-head agents
         if agent.task == "nav":
-            # agent.state.target_goal_index[1] = 1
-            # agent.state.task_complete[1] = True
-            # agent.counter_part.state.task_complete[1] = True
-            # agent.state.task_complete[4] = True
-            # agent.counter_part.state.task_complete[4] = True
-
             # Stack truth values for an agents target goal index across num goals.
             target_goals = torch.stack(
                 [agent.state.target_goal_index == i for i in range(self.n_goals)], 1)
@@ -815,8 +807,6 @@ class Scenario(BaseScenario):
             # Update the agent target
             agent.state.target_goal_index[task_complete] = next_goal_index
             agent.counter_part.state.target_goal_index[task_complete] = next_goal_index
-            # NOTE: Testing adding a cumulative reward to the mixing agent to encourage re-mixing for new goal
-            #   Might want to do this on task completion instead as the final goal doesn't active this conditional?
             if self.cumulative_rewards:
                 agent.counter_part.rewards['cumulative'] += agent.counter_part.rewards['final']
 
