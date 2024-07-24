@@ -109,8 +109,10 @@ class DOTSAgent(Agent):
             # TODO: Add agent labels?
             geoms = super().render(env_index)
 
-            primary_knowledge = rendering.make_circle(proportion=0.5, radius=self.shape.radius / 2)
-            mixed_knowledge = rendering.make_circle(proportion=0.5, radius=self.shape.radius / 2)
+            # primary_knowledge = rendering.make_circle(proportion=0.5, radius=self.shape.radius / 2)
+            # mixed_knowledge = rendering.make_circle(proportion=0.5, radius=self.shape.radius / 2)
+            primary_knowledge = rendering.make_circle(angle=math.pi, radius=self.shape.radius / 2)
+            mixed_knowledge = rendering.make_circle(angle=math.pi, radius=self.shape.radius / 2)
 
             if self.counter_part is not None:
                 mix_head = self.counter_part
@@ -134,9 +136,9 @@ class DOTSAgent(Agent):
             m_xform = rendering.Transform()
             mixed_knowledge.add_attr(m_xform)
             p_xform.set_translation(self.state.pos[env_index][0], self.state.pos[env_index][1])
-            p_xform.set_rotation(math.pi / 2)
+            p_xform.set_rotation(math.pi)
             m_xform.set_translation(self.state.pos[env_index][0], self.state.pos[env_index][1])
-            m_xform.set_rotation(-math.pi / 2)
+
             # label = TextLine(f"Agent {i}", x=agent.state.pos[env_index][X], y=agent.state.pos[env_index][Y] - 10)
             # geoms.append(label)
             geoms.append(primary_knowledge)

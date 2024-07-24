@@ -18,7 +18,7 @@ EPSILON = 1e-6
 
 
 # TODO:
-#  1. Later: Implementation assumes agent[i] and goal[i] are always connected. Does not necessarily generalise
+#  1. Randomise which agent is allocated the RGB values -> Generalise the source knowledge.
 
 def get_distinct_color_list(n_cols, device: torch.device):
     opts = sns.color_palette(palette="Set2")
@@ -255,9 +255,9 @@ class Scenario(BaseScenario):
 
         return small_knowledge, large_knowledge
 
-    # TODO: Have some check to ensure all goal mixes are unique?
     def unmixed_paints(self, device):
         if self.random_knowledge:
+            # TODO: Differentiate between random in all dimensions, and random in a singular dimension.
             # Generate a set of random knowledge vectors K (one per agent) such that sum over all knowledge K_i > 1.
             agent_knowledge, solvable = None, False
             while not solvable:
@@ -973,7 +973,7 @@ if __name__ == '__main__':
     render_interactively(
         __file__,
         n_agents=3,
-        n_goals=4,
+        n_goals=3,
         pos_shaping=True,
         mix_shaping=True,
         task_type="full",
