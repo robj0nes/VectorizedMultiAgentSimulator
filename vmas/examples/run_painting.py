@@ -1,44 +1,29 @@
-#  Copyright (c) 2022-2024.
-#  ProrokLab (https://www.proroklab.org/)
-#  All rights reserved.
-import random
 import time
+
 import torch
 
 from vmas import make_env
-from vmas.simulator.core import Agent
 from vmas.simulator.utils import save_video
 
 
-def _get_deterministic_action(agent: Agent, continuous: bool, env):
-    if continuous:
-        action = -agent.action.u_range_tensor.expand(env.batch_dim, agent.action_size)
-    else:
-        action = (
-            torch.tensor([1], device=env.device, dtype=torch.long)
-            .unsqueeze(-1)
-            .expand(env.batch_dim, 1)
-        )
-    return action.clone()
-
-
-def use_vmas_env(
-    render: bool = False,
-    save_render: bool = False,
-    num_envs: int = 32,
-    n_steps: int = 100,
-    random_action: bool = False,
-    device: str = "cpu",
-    scenario_name: str = "waterfall",
-    continuous_actions: bool = True,
-    visualize_render: bool = True,
-    dict_spaces: bool = True,
-    **kwargs,
+def run_painting(
+        render: bool = False,
+        save_render: bool = False,
+        num_envs: int = 32,
+        n_steps: int = 100,
+        random_action: bool = False,
+        device: str = "cpu",
+        scenario_name: str = "waterfall",
+        n_agents: int = 3,
+        n_goals: int = 3,
+        continuous_actions: bool = True,
+        visualize_render: bool = True,
 ):
     """Example function to use a vmas environment
 
     Args:
         continuous_actions (bool): Whether the agents have continuous or discrete actions
+        n_agents (int): Number of agents
         scenario_name (str): Name of scenario
         device (str): Torch device to use
         render (bool): Whether to render the scenario
@@ -47,14 +32,19 @@ def use_vmas_env(
         n_steps (int): Number of steps before returning done
         random_action (bool): Use random actions or have all agents perform the down action
         visualize_render (bool, optional): Whether to visualize the render. Defaults to ``True``.
-        dict_spaces (bool, optional): Weather to return obs, rewards, and infos as dictionaries with agent names.
-            By default, they are lists of len # of agents
-        kwargs (dict, optional): Keyword arguments to pass to the scenario
 
     Returns:
 
     """
     assert not (save_render and not render), "To save the video you have to render it"
+
+    dict_spaces = True  # Weather to return obs, rewards, and infos as dictionaries with agent names
+    # (by default they are lists of len # of agents)
+    model = torch.load('/Users/vd20433/FARSCOPE/FirstYearProject/Checkpoints/Full Task/pre-trained_3A-3G/checkpoints/pre-trained_checkpoint_6000000.pt')
+    # Set up loss modules.
+    losses = {}
+    for group in ["nav_agents", "mix_agents"]:
+        losses[group].load_state_dict(model[f"loss_{group}"])
 
     env = make_env(
         scenario=scenario_name,
@@ -65,33 +55,33 @@ def use_vmas_env(
         wrapper=None,
         seed=None,
         # Environment specific variables
-        **kwargs,
+        n_agents=n_agents,
+        n_goals=n_goals,
+        pos_shaping=True,
+        mix_shaping=True,
+        task_type="full",
+        knowledge_shape=(2, 3),
+        clamp_actions=True,
+        agent_collision_penalty=-0.2,
+        env_collision_penalty=-0.2,
+        multi_head=True
     )
 
     frame_list = []  # For creating a gif
     init_time = time.time()
     step = 0
 
+    policies = {}
+    for agent in env.agents:
+        # TODO: Setup GNN model for each agent.
+        # TODO: Load checkpoint for agent.
+        pass
+
     for _ in range(n_steps):
         step += 1
         print(f"Step {step}")
 
-        # VMAS actions can be either a list of tensors (one per agent)
-        # or a dict of tensors (one entry per agent with its name as key)
-        # Both action inputs can be used independently of what type of space its chosen
-        dict_actions = random.choice([True, False])
-
-        actions = {} if dict_actions else []
-        for agent in env.agents:
-            if not random_action:
-                action = _get_deterministic_action(agent, continuous_actions, env)
-            else:
-                action = env.get_random_action(agent)
-            if dict_actions:
-                actions.update({agent.name: action})
-            else:
-                actions.append(action)
-
+        actions = {}
         obs, rews, dones, info = env.step(actions)
 
         if render:
@@ -113,13 +103,14 @@ def use_vmas_env(
         save_video(scenario_name, frame_list, fps=1 / env.scenario.world.dt)
 
 
-if __name__ == "__main__":
-    use_vmas_env(
-        scenario_name="simple_world_comm",
+if __name__ == '__main__':
+    run_painting(
+        scenario_name="painting",
         render=True,
         save_render=False,
         random_action=False,
-        continuous_actions=False,
-        # Environment specific
-        n_agents=4
+        continuous_actions=True,
+        n_steps=1000,
+        n_agents=3,
+        n_goals=6
     )
