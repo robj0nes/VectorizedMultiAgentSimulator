@@ -5,9 +5,9 @@ from typing import List
 import torch
 from torch import Tensor
 
-from vmas.simulator import rendering
+# from vmas.simulator import rendering
 from vmas.simulator.core import Agent, World, Landmark, Box, AgentState, EntityState
-from vmas.simulator.rendering import Geom
+# from vmas.simulator.rendering import Geom
 from vmas.simulator.utils import Color, override
 
 
