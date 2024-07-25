@@ -50,6 +50,7 @@ class Scenario(BaseScenario):
         self.multi_head = None
         self.knowledge_shape = None
         self.random_knowledge = None  # Is agent source knowledge randomly generated.
+        self.random_all_dims = None  # If random agent knowledge, are all dims random, or just one.
         self.agent_action_size = None
         self.dim_c = None
 
@@ -91,6 +92,7 @@ class Scenario(BaseScenario):
         # Knowledge is of shape: [2 (source, learnt), knowledge dim (eg. 3-RGB)]
         self.knowledge_shape = kwargs.get("knowledge_shape", (2, 3))
         self.random_knowledge = kwargs.get("random_knowledge", False)
+        self.random_all_dims = kwargs.get("random_all_dims", False)
         self.multi_head = kwargs.get("multi_head", False)
         self.observation_proximity = kwargs.get("observation_proximity", self.arena_size)
         self.observe_all_goals = kwargs.get("observe_all_goals", False)
@@ -256,8 +258,7 @@ class Scenario(BaseScenario):
         return small_knowledge, large_knowledge
 
     def unmixed_paints(self, device):
-        if self.random_knowledge:
-            # TODO: Differentiate between random in all dimensions, and random in a singular dimension.
+        if self.random_knowledge and self.random_all_dims:
             # Generate a set of random knowledge vectors K (one per agent) such that sum over all knowledge K_i > 1.
             agent_knowledge, solvable = None, False
             while not solvable:
@@ -280,8 +281,12 @@ class Scenario(BaseScenario):
         else:
             single_batch = torch.stack(
                 [torch.zeros(self.n_agents, device=device, dtype=torch.float32) for _ in range(self.n_agents)])
-            for i in range(self.n_agents):
-                single_batch[i][i] += 1
+            if self.random_knowledge and not self.random_all_dims:
+                for i in range(self.n_agents):
+                    single_batch[i][i] += np.random.uniform(0.01, 1.0, 1)[0]
+            else:
+                for i in range(self.n_agents):
+                    single_batch[i][i] += 1
             agent_knowledge = torch.stack(
                 [
                     single_batch.clone()
@@ -289,16 +294,39 @@ class Scenario(BaseScenario):
                 ]
             )
 
-        # Generate a random colour in RGB colour space for the goals.
+        # agent_knowledge = agent_knowledge.repeat(4, 1, 1)
+        # agent_knowledge[1] += 0.1
+        # agent_knowledge[3] += 1
+
+        limits = torch.clamp(torch.sum(agent_knowledge, dim=1), 0, 1)
+        # We know agents knowledge is at least 1 in every knowledge dim.
+        #  Therefore: Generate a random knowledge goal.
+        # TODO: Surely this can be zero? - Test
         goal_knowledge = torch.stack(
             [
-                torch.stack([
-                    torch.tensor(np.random.uniform(0.01, 1.0, 3), device=device, dtype=torch.float32)
-                    for _ in range(self.n_goals)
-                ])
-                for _ in range(self.world.batch_dim)
+                torch.stack(
+                    [
+                        torch.tensor(
+                            [np.random.uniform(0.01, limits[j][i], 1)[0] for i in range(len(limits[j]))],
+                            device=device, dtype=torch.float32
+                        )
+                        for _ in range(self.n_goals)
+                    ]
+                )
+                for j in range(agent_knowledge.shape[0])
             ]
         )
+
+        # NOTE: OLD Version
+        # goal_knowledge = torch.stack(
+        #     [
+        #         torch.stack([
+        #             torch.tensor(np.random.uniform(0.01, 1.0, 3), device=device, dtype=torch.float32)
+        #             for _ in range(self.n_goals)
+        #         ])
+        #         for _ in range(self.world.batch_dim)
+        #     ]
+        # )
 
         return agent_knowledge, goal_knowledge
 
@@ -981,5 +1009,6 @@ if __name__ == '__main__':
         clamp_actions=True,
         agent_collision_penalty=-0.2,
         env_collision_penalty=-0.2,
-        multi_head=True
+        multi_head=True,
+        random_knowledge=True
     )
