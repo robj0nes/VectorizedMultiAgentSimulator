@@ -68,6 +68,8 @@ class Scenario(BaseScenario):
 
     def make_world(self, batch_dim: int, device: torch.device, **kwargs) -> World:
         self.define_world_properties(kwargs)
+        self.define_agent_properties(kwargs)
+        self.define_goal_properties(kwargs)
         self.define_task_properties(kwargs)
         self.define_reward_properties(batch_dim, device, kwargs)
 
@@ -81,14 +83,22 @@ class Scenario(BaseScenario):
         return world
 
     def define_world_properties(self, kwargs):
-        self.n_agents = kwargs.get("n_agents", 4)
-        self.goals_from_image = kwargs.get("goals_from_image", False)
-        self.n_goals = kwargs.get("n_goals", 4)
-        self.agent_radius = kwargs.get("agent_radius", 0.3)
-        self.goal_width = kwargs.get("goal_width", self.agent_radius * 3)
-        self.goal_height = kwargs.get("goal_height", self.agent_radius * 3)
         self.arena_size = kwargs.get("arena_size", 5)
         self.viewer_zoom = kwargs.get("viewer_zoom", 1.7)
+
+    def define_agent_properties(self, kwargs):
+        self.n_agents = kwargs.get("n_agents", 4)
+        self.agent_radius = kwargs.get("agent_radius", 0.3)
+
+    def define_goal_properties(self, kwargs):
+        self.goals_from_image = kwargs.get("goals_from_image", None)
+        if self.goals_from_image:
+            # Set num goals, goal width and goal height.
+            pass
+        else:
+            self.n_goals = kwargs.get("n_goals", 4)
+            self.goal_width = kwargs.get("goal_width", self.agent_radius * 3)
+            self.goal_height = kwargs.get("goal_height", self.agent_radius * 3)
 
     def define_task_properties(self, kwargs):
         self.task_type = kwargs.get("task_type", "nav")
