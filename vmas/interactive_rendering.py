@@ -127,9 +127,10 @@ class InteractiveEnv:
                                                                                                              self.agents[
                                                                                                                  self.current_agent_index2].action_size
                                                                                                              ]
+
             obs, rew, done, info = self.env.step(action_list)
 
-            if self.display_info:
+            if self.display_info and self.n_agents > 0:
                 # TODO: Determine number of lines of obs_str and render accordingly
                 obs_str = str(InteractiveEnv.format_obs(obs[self.current_agent_index]))
                 message = f"\t\t{obs_str[len(obs_str) // 2:]}"
