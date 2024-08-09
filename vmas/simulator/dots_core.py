@@ -105,17 +105,17 @@ class DOTSAgent(Agent):
 
     @override(Agent)
     def render(self, env_index: int = 0) -> "List[Geom]":
+        # This should only be called if the agent head is navigation..
         if self.render_agent:
             # TODO: Add agent labels?
             geoms = super().render(env_index)
 
-            # primary_knowledge = rendering.make_circle(proportion=0.5, radius=self.shape.radius / 2)
-            # mixed_knowledge = rendering.make_circle(proportion=0.5, radius=self.shape.radius / 2)
             primary_knowledge = rendering.make_circle(angle=math.pi, radius=self.shape.radius / 2)
             mixed_knowledge = rendering.make_circle(angle=math.pi, radius=self.shape.radius / 2)
 
             if self.counter_part is not None:
-                mix_head = self.counter_part
+                mix_head = [self.counter_part[i] for i in range(len(self.counter_part))
+                            if self.counter_part[i].task == "listen"][0]
             else:
                 mix_head = self
             primary_col = mix_head.state.knowledge[env_index][0].reshape(-1)[:3]

@@ -105,7 +105,7 @@ class InteractiveEnv:
                 total_rew = [0] * self.n_agents
 
             if self.n_agents > 0:
-                action_list = [[0.0] * agent.action_size for agent in self.agents]
+                action_list = [[0.0] * (agent.action_size + agent.state.c.shape[1]) for agent in self.agents]
                 action_list[self.current_agent_index][
                     : self.agents[self.current_agent_index].dynamics.needed_action_size
                 ] = self.u[
