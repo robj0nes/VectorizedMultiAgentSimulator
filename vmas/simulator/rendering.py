@@ -523,11 +523,11 @@ def render_function_util(
 
     return geom
 
+
 def make_circle(radius=10, res=30, filled=True, angle=2 * math.pi):
     return make_ellipse(
         radius_x=radius, radius_y=radius, res=res, filled=filled, angle=angle
     )
-
 
 def make_ellipse(radius_x=10, radius_y=5, res=30, filled=True, angle=2 * math.pi):
     points = []

@@ -104,22 +104,30 @@ class InteractiveEnv:
                 self.reset = False
                 total_rew = [0] * self.n_agents
 
-            if self.n_agents > 0:
-                action_list = [[0.0] * (agent.action_size + agent.state.c.shape[1]) for agent in self.agents]
-                action_list[self.current_agent_index][
-                    : self.agents[self.current_agent_index].dynamics.needed_action_size
-                ] = self.u[
-                    : self.agents[self.current_agent_index].dynamics.needed_action_size
-                ]
-            else:
-                action_list = []
+            # Note: Updated this as coms weren't included as part of action in original implementation
+            # dim_c = self.env.env.world.dim_c if self.env.env.world.dim_c is not None else 0
+            action_list = [
+                [0.0] * agent.action_size for agent in self.agents
+            ]
+            # Append current coms state to action list
+            for i in range(self.n_agents):
+                if not self.agents[i].silent:
+                    action_list[i] += self.c[i].tolist()
+
+            action_list[self.current_agent_index][:self.agents[self.current_agent_index].action_size] = self.u[
+                                                                                                        : self.agents[
+                                                                                                            self.current_agent_index].action_size
+                                                                                                        ]
+            action_list[self.current_agent_index][self.agents[self.current_agent_index].action_size:] = self.c[
+                self.current_agent_index]
 
             if self.n_agents > 1 and self.control_two_agents:
-                action_list[self.current_agent_index2][
-                    : self.agents[self.current_agent_index2].dynamics.needed_action_size
-                ] = self.u2[
-                    : self.agents[self.current_agent_index2].dynamics.needed_action_size
-                ]
+                action_list[self.current_agent_index2][:self.agents[self.current_agent_index].action_size] = self.u2[
+                                                                                                             :
+                                                                                                             self.agents[
+                                                                                                                 self.current_agent_index2].action_size
+                                                                                                             ]
+
             obs, rew, done, info = self.env.step(action_list)
 
             if self.display_info and self.n_agents > 0:
