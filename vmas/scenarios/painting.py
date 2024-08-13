@@ -30,6 +30,7 @@ class Scenario(BaseScenario):
     def __init__(self):
         super().__init__()
         # World properties
+        self.debug = None
         self.n_agents = None
         self.n_goals = None
         self.arena_size = None
@@ -52,6 +53,7 @@ class Scenario(BaseScenario):
         self.knowledge_shape = None
         self.random_knowledge = None  # Is agent source knowledge randomly generated.
         self.random_all_dims = None  # If random agent knowledge, are all dims random, or just one.
+        self.random_source_dim = None
         self.agent_action_size = None
         self.dim_c = None
 
@@ -83,6 +85,7 @@ class Scenario(BaseScenario):
         return world
 
     def define_world_properties(self, kwargs):
+        self.debug = kwargs.get('debug', True)
         self.arena_size = kwargs.get("arena_size", 5)
         self.viewer_zoom = kwargs.get("viewer_zoom", 1.7)
 
@@ -93,6 +96,7 @@ class Scenario(BaseScenario):
     def define_goal_properties(self, kwargs):
         self.goals_from_image = kwargs.get("goals_from_image", None)
         if self.goals_from_image:
+            # TODO: Read in image and identify contiguous blocks of colour.
             # Set num goals, goal width and goal height.
             pass
         else:
@@ -105,6 +109,7 @@ class Scenario(BaseScenario):
         # Knowledge is of shape: [2 (source, learnt), knowledge dim (eg. 3-RGB)]
         self.knowledge_shape = kwargs.get("knowledge_shape", (2, 3))
         self.random_knowledge = kwargs.get("random_knowledge", False)
+        self.random_source_dim = kwargs.get("random_source_dim", False)
         self.random_all_dims = kwargs.get("random_all_dims", False)
         self.multi_head = kwargs.get("multi_head", False)
         self.observation_proximity = kwargs.get("observation_proximity", self.arena_size)
@@ -153,6 +158,7 @@ class Scenario(BaseScenario):
         # TODO: If we take this approach we need to consider how to implement the two agents as one entity.
         # Question: Can we dynamically create agent groups?
         # Handle multi-head agent naming conventions.
+
         if self.multi_head:
             name_ext = ["nav-", "speak-", "listen-"]
             for ext in name_ext:
@@ -183,6 +189,7 @@ class Scenario(BaseScenario):
                             "cumulative": torch.zeros(batch_dim, device=device),
                             "final": torch.zeros(batch_dim, device=device)
                         }
+
                     self.agent_list[ext.strip("-")].append(agent)
                     self.all_agents.append(agent)
                     self.selected_goals[:, i] = True
@@ -305,9 +312,15 @@ class Scenario(BaseScenario):
         else:
             single_batch = torch.stack(
                 [torch.zeros(self.n_agents, device=device, dtype=torch.float32) for _ in range(self.n_agents)])
+
             if self.random_knowledge and not self.random_all_dims:
                 for i in range(self.n_agents):
                     single_batch[i][i] += np.random.uniform(0.01, 1.0, 1)[0]
+
+            elif self.random_source_dim:
+                indices = random.sample(range(self.n_agents), self.n_agents)
+                for j, i in zip(range(self.n_agents), indices):
+                    single_batch[j][i] += 1
             else:
                 for i in range(self.n_agents):
                     single_batch[i][i] += 1
@@ -336,17 +349,6 @@ class Scenario(BaseScenario):
                 for j in range(agent_knowledge.shape[0])
             ]
         )
-
-        # NOTE: OLD Version
-        # goal_knowledge = torch.stack(
-        #     [
-        #         torch.stack([
-        #             torch.tensor(np.random.uniform(0.01, 1.0, 3), device=device, dtype=torch.float32)
-        #             for _ in range(self.n_goals)
-        #         ])
-        #         for _ in range(self.world.batch_dim)
-        #     ]
-        # )
 
         return agent_knowledge, goal_knowledge
 
@@ -913,15 +915,13 @@ class Scenario(BaseScenario):
             agent_index = agent.agent_index
 
             # Generate a tensor of shape [batch_dim, agent_head_completion]
+            # NOTE: We technically only need to have success at listening and navigation to complete a task.
+            keys = ["nav", "listen"]
             completion_status = torch.stack(
-                [self.agent_list[key][agent_index].state.task_complete for key in self.agent_list.keys()], dim=1
+                [self.agent_list[key][agent_index].state.task_complete for key in keys], dim=1
             )
             # Identify batch dims where all agent heads have completed their respective goals.
             task_complete = torch.all(completion_status, dim=1)
-
-            # Identify batch dims where agents have completed both mix and nav tasks.
-            # task_complete = torch.logical_and(agent.state.task_complete,
-            #                                   agent.counter_part.state.task_complete)
 
             if task_complete.any():
                 self.update_goal_completion(target_goals, task_complete)
@@ -993,14 +993,15 @@ class Scenario(BaseScenario):
 
     def extra_render(self, env_index: int = 0):
         geoms = []
-        for agent in self.all_agents:
-            self.render_rewards(agent, env_index, geoms)
-            if agent.task == "speak":
-                self.render_speaker_actions(agent, env_index, geoms)
-            if agent.task == "listen":
-                self.render_mix_actions(agent, env_index, geoms)
-            if agent.task == "nav":
-                self.render_nav_actions(agent, env_index, geoms)
+        if self.debug:
+            for agent in self.all_agents:
+                self.render_rewards(agent, env_index, geoms)
+                if agent.task == "speak":
+                    self.render_speaker_actions(agent, env_index, geoms)
+                if agent.task == "listen":
+                    self.render_mix_actions(agent, env_index, geoms)
+                if agent.task == "nav":
+                    self.render_nav_actions(agent, env_index, geoms)
         return geoms
 
     def render_speaker_actions(self, agent, env_index, geoms):
