@@ -270,9 +270,10 @@ class DOTSAgentState(AgentState):
 
 
 class DOTSPayloadDest(Landmark):
-    def __init__(self, render=True, expected_knowledge_shape=None, **kwargs):
+    def __init__(self, render=True, expected_knowledge_shape=None, position=None, **kwargs):
         super().__init__(**kwargs)
-        self.render_goal = render,
+        self.render_goal = render
+        self.position = position
         self.expected_knowledge_shape = expected_knowledge_shape
         self._state = DOTSPayloadDestState(expected_knowledge_shape)
 

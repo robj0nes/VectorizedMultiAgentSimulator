@@ -1,4 +1,6 @@
 import random
+
+import cv2
 import numpy as np
 import torch
 import seaborn as sns
@@ -44,6 +46,7 @@ class Scenario(BaseScenario):
         self.completed_goals = None
         self.selected_goals = None
         self.goals_from_image = None
+        self.img = None
 
         # Agent properties
         self.agent_radius = None
@@ -96,9 +99,12 @@ class Scenario(BaseScenario):
     def define_goal_properties(self, kwargs):
         self.goals_from_image = kwargs.get("goals_from_image", None)
         if self.goals_from_image:
-            # TODO: Read in image and identify contiguous blocks of colour.
-            # Set num goals, goal width and goal height.
-            pass
+            self.img = cv2.cvtColor(cv2.imread(self.goals_from_image), cv2.COLOR_BGR2RGB) / 255
+            im_height = self.img.shape[0]
+            im_width = self.img.shape[1]
+            self.n_goals = im_width * im_height
+            self.goal_width = self.arena_size / im_width
+            self.goal_height = self.arena_size / im_height
         else:
             self.n_goals = kwargs.get("n_goals", 4)
             self.goal_width = kwargs.get("goal_width", self.agent_radius * 3)
@@ -155,7 +161,6 @@ class Scenario(BaseScenario):
     def instantiate_agents(self, batch_dim, device, world):
         self.all_agents = []
         self.agent_list = {"nav": [], "speak": [], "listen": []}
-        # TODO: If we take this approach we need to consider how to implement the two agents as one entity.
         # Question: Can we dynamically create agent groups?
         # Handle multi-head agent naming conventions.
 
@@ -173,7 +178,6 @@ class Scenario(BaseScenario):
                         render=True if "nav" in ext else False,
                         knowledge_shape=None if "nav" in ext else self.knowledge_shape,
                         silent=True if self.dim_c == 0 else False,
-                        # TODO: Make action size > 2 to learn mixing weights.
                         action_size=self.agent_action_size
                     )
                     if "nav" in ext:
@@ -248,16 +252,35 @@ class Scenario(BaseScenario):
              for _ in range(self.n_goals)], 1)
         self.selected_goals = self.completed_goals.clone()
 
-        for i in range(self.n_goals):
-            goal = DOTSPayloadDest(
-                name=f"goal_{i}",
-                collide=False,
-                shape=Box(length=self.goal_width, width=self.goal_height),
-                color=Color.BLUE,
-                expected_knowledge_shape=3
-            )
-            self.goals.append(goal)
-            world.add_landmark(goal)
+        if not self.goals_from_image:
+            for i in range(self.n_goals):
+                goal = DOTSPayloadDest(
+                    name=f"goal_{i}",
+                    collide=False,
+                    shape=Box(length=self.goal_width, width=self.goal_height),
+                    color=Color.BLUE,
+                    expected_knowledge_shape=3
+                )
+                self.goals.append(goal)
+                world.add_landmark(goal)
+        else:
+            for y in range(self.img.shape[1]):
+                for x in range(self.img.shape[0]):
+                    goal_pos = (
+                        self.goal_height * y - self.arena_size / 2 + (self.goal_height / 2),
+                        self.goal_width * x - self.arena_size / 2 + (self.goal_width / 2)
+                    )
+                    goal = DOTSPayloadDest(
+                        name=f"goal_{y}_{x}",
+                        collide=False,
+                        shape=Box(length=self.goal_width, width=self.goal_height),
+                        color=self.img[y][x],
+                        expected_knowledge_shape=3,
+                        position=goal_pos
+                    )
+                    self.goals.append(goal)
+                    world.add_landmark(goal)
+            random.shuffle(self.goals)
 
     def premix_paints(self, large, device):
         """ Takes the largest of n_agents, or n_goals and forms unique pairs,
@@ -363,8 +386,14 @@ class Scenario(BaseScenario):
         return agent_knowledge, goal_knowledge
 
     def reset_agents(self, env_index):
+        if not self.goals_from_image:
+            rdm_entities = self.agent_list['nav'] + self.goals
+        else:
+            rdm_entities = self.agent_list['nav']
+            for g in self.goals:
+                g.set_pos(torch.tensor(g.position), env_index)
         ScenarioUtils.spawn_entities_randomly(
-            self.agent_list['nav'] + self.goals,
+            rdm_entities,
             self.world,
             env_index,
             min_dist_between_entities=1,
@@ -373,6 +402,10 @@ class Scenario(BaseScenario):
         )
 
         agent_knowledge, goal_knowledge = self.random_paint_generator(self.world.device)
+        if self.goals_from_image:
+            goal_knowledge = torch.stack(
+                [torch.tensor(goal.color, device=self.world.device, dtype=torch.float32) for goal in self.goals]
+            ).repeat(self.world.batch_dim, 1, 1)
 
         # TODO: Refactor to tidy
         for i, agent in enumerate(self.agent_list["listen"]):
@@ -688,7 +721,7 @@ class Scenario(BaseScenario):
         all_complete = torch.logical_and(torch.logical_and(torch.all(nav_agent_completion, dim=1),
                                                            torch.all(mix_agent_completion, dim=1)),
                                          torch.all(coms_agent_completion, dim=1))
-        self.final_rew[all_complete] += self.final_pos_reward + self.final_mix_reward
+        self.final_rew[all_complete] += self.final_pos_reward + self.final_mix_reward + self.final_coms_reward
 
     def reset_final_rewards(self):
         self.final_pos_rew[:] = 0
@@ -709,6 +742,10 @@ class Scenario(BaseScenario):
                 ], 1)
 
             agent.state.task_complete = dists[target_goals] < agent.shape.radius
+            # TODO: Try only applying a final reward when the listener has mixed.
+            # agent.rewards["final"][agent.state.task_complete] += (
+            #         (self.final_pos_reward / self.n_agents)
+            #         * self.agent_list['listen'][agent.agent_index].state.task_complete)
             agent.rewards["final"][agent.state.task_complete] += self.final_pos_reward / self.n_agents
 
             if self.pos_shaping:
@@ -837,7 +874,7 @@ class Scenario(BaseScenario):
             [torch.linalg.vector_norm(agent.state.pos - other.state.pos, dim=1)
              for other in self.agent_list['listen'] if other != agent]))
                     < self.coms_proximity) * request_mix)
-        any_in_prox = torch.logical_or(*in_prox)
+        any_in_prox = torch.any(in_prox, dim=0)
 
         # Clone existing agent learnt knowledge.
         new_mix = agent.state.knowledge[:, 1, :].clone()
@@ -1028,7 +1065,7 @@ class Scenario(BaseScenario):
                              + "]    "
                              + "mix_coef: ["
                              + ",".join(
-                              [f"{(a + 1) / 2:.2f}" for a in agent.action.u[env_index, -self.knowledge_shape[-1]:]])
+                        [f"{(a + 1) / 2:.2f}" for a in agent.action.u[env_index, -self.knowledge_shape[-1]:]])
                              + "]")
 
             vert_offset = 525 - (30 * self.n_agents) - 100 - (15 * self.n_agents)
@@ -1049,7 +1086,7 @@ class Scenario(BaseScenario):
                          + ",".join([f"{p:.2f}" for p in agent.state.knowledge[env_index, 1, :]])
                          + "]  goal: ["
                          + ",".join(
-                          [f"{g:.2f}" for g in self.goals[target_goal].state.expected_knowledge[env_index]])
+                        [f"{g:.2f}" for g in self.goals[target_goal].state.expected_knowledge[env_index]])
                          + "]  dist: "
                          + f"""{torch.linalg.vector_norm(self.goals[target_goal].state.expected_knowledge[env_index] -
                                                          agent.state.knowledge[env_index, 1, :]):.2f}"""
@@ -1118,7 +1155,7 @@ class Scenario(BaseScenario):
             final_mix_rew = rendering.TextLine(f'final mix rew: {self.final_mix_rew[env_index]:.2f}',
                                                y=630, font_size=10)
             final_coms_rew = rendering.TextLine(f'final coms rew: {self.final_coms_rew[env_index]:.2f}',
-                                               y=615, font_size=10)
+                                                y=615, font_size=10)
 
             geoms.append(final_rew)
             geoms.append(final_pos_rew)
