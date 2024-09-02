@@ -47,6 +47,8 @@ class Scenario(BaseScenario):
         self.selected_goals = None
         self.goals_from_image = None
         self.img = None
+        self.img_alpha = None
+
 
         # Agent properties
         self.agent_radius = None
@@ -99,10 +101,12 @@ class Scenario(BaseScenario):
     def define_goal_properties(self, kwargs):
         self.goals_from_image = kwargs.get("goals_from_image", None)
         if self.goals_from_image:
-            self.img = cv2.cvtColor(cv2.imread(self.goals_from_image), cv2.COLOR_BGR2RGB) / 255
+            im = cv2.imread(self.goals_from_image, cv2.IMREAD_UNCHANGED)
+            self.img_alpha = im[:, :, -1] / 255
+            self.img = cv2.cvtColor(cv2.imread(self.goals_from_image, cv2.IMREAD_UNCHANGED), cv2.COLOR_BGR2RGB) / 255
             im_height = self.img.shape[0]
             im_width = self.img.shape[1]
-            self.n_goals = im_width * im_height
+            self.n_goals = np.count_nonzero(self.img_alpha)
             self.goal_width = self.arena_size / im_width
             self.goal_height = self.arena_size / im_height
         else:
@@ -264,22 +268,23 @@ class Scenario(BaseScenario):
                 self.goals.append(goal)
                 world.add_landmark(goal)
         else:
-            for y in range(self.img.shape[1]):
-                for x in range(self.img.shape[0]):
-                    goal_pos = (
-                        self.goal_height * y - self.arena_size / 2 + (self.goal_height / 2),
-                        self.goal_width * x - self.arena_size / 2 + (self.goal_width / 2)
-                    )
-                    goal = DOTSPayloadDest(
-                        name=f"goal_{y}_{x}",
-                        collide=False,
-                        shape=Box(length=self.goal_width, width=self.goal_height),
-                        color=self.img[y][x],
-                        expected_knowledge_shape=3,
-                        position=goal_pos
-                    )
-                    self.goals.append(goal)
-                    world.add_landmark(goal)
+            for y in range(self.img.shape[0]):
+                for x in range(self.img.shape[1]):
+                    if self.img_alpha[y][x] != 0:
+                        goal_pos = (
+                            self.goal_width * x - self.arena_size / 2 + (self.goal_width / 2),
+                            self.goal_height * (self.img.shape[0] - y) - self.arena_size / 2 - (self.goal_height / 2)
+                        )
+                        goal = DOTSPayloadDest(
+                            name=f"goal_{y}_{x}",
+                            collide=False,
+                            shape=Box(length=self.goal_width, width=self.goal_height),
+                            color=self.img[y][x],
+                            expected_knowledge_shape=3,
+                            position=goal_pos
+                        )
+                        self.goals.append(goal)
+                        world.add_landmark(goal)
             random.shuffle(self.goals)
 
     def premix_paints(self, large, device):
@@ -746,7 +751,7 @@ class Scenario(BaseScenario):
             # agent.rewards["final"][agent.state.task_complete] += (
             #         (self.final_pos_reward / self.n_agents)
             #         * self.agent_list['listen'][agent.agent_index].state.task_complete)
-            agent.rewards["final"][agent.state.task_complete] += self.final_pos_reward / self.n_agents
+            agent.rewards["final"][agent.state.task_complete] += self.final_pos_reward / (self.n_agents + 1)
 
             if self.pos_shaping:
                 # Perform position shaping on goal distances
@@ -761,7 +766,7 @@ class Scenario(BaseScenario):
                 agent.state.knowledge[:, 0, :] - agent.state.c[:, -self.knowledge_shape[1]:], dim=1)
 
             agent.state.task_complete = coms_dist < self.coms_thresh
-            agent.rewards["final"][agent.state.task_complete] += self.final_coms_reward / self.n_agents
+            agent.rewards["final"][agent.state.task_complete] += self.final_coms_reward / (self.n_agents + 1)
 
             if self.coms_shaping:
                 # Perform reward shaping on knowledge mixtures.
@@ -783,7 +788,7 @@ class Scenario(BaseScenario):
                 ], 1)
 
             agent.state.task_complete = knowledge_dists[target_goals] < self.mixing_thresh
-            agent.rewards["final"][agent.state.task_complete] += self.final_mix_reward / self.n_agents
+            agent.rewards["final"][agent.state.task_complete] += self.final_mix_reward / (self.n_agents + 1)
 
             if self.mix_shaping:
                 # Perform reward shaping on knowledge mixtures.

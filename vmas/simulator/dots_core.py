@@ -265,7 +265,6 @@ class DOTSAgentState(AgentState):
             self.knowledge = torch.zeros(
                 self.batch_dim, *self.knowledge_shape, device=self.device, dtype=torch.float32
             )
-
         super()._spawn(dim_c, dim_p)
 
 
