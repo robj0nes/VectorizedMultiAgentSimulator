@@ -363,12 +363,15 @@ class Scenario(BaseScenario):
         # We know agents knowledge is at least 1 in every knowledge dim.
         #  Therefore: Generate a random knowledge goal.
         # TODO: Surely this can be zero? - Test
+        
         goal_knowledge = torch.stack(
             [
                 torch.stack(
                     [
                         torch.tensor(
-                            [np.random.uniform(0.01, limits[j][i], 1)[0] for i in range(len(limits[j]))],
+                            [
+                                (limits[j][i] - 0.01) * torch.rand(1, device=device) + 0.01 for i in range(len(limits[j]))
+                            ],
                             device=device, dtype=torch.float32
                         )
                         for _ in range(self.n_goals)
