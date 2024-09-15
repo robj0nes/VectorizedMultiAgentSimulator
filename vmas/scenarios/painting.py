@@ -52,7 +52,7 @@ class Scenario(BaseScenario):
 
         # Agent properties
         self.agent_radius = None
-        self.agent_list = None  # Dict should be a list of agents grouped by task (i.e. 'nav', 'mix')
+        self.agent_list = None  # Dict should be a list of agents num_agents_maddpg by task (i.e. 'nav', 'mix')
         self.all_agents = None  # List of DOTSAgents
         self.multi_head = None
         self.knowledge_shape = None
