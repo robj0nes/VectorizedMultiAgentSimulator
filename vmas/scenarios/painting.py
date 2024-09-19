@@ -52,7 +52,7 @@ class Scenario(BaseScenario):
 
         # Agent properties
         self.agent_radius = None
-        self.agent_list = None  # Dict should be a list of agents num_agents_maddpg by task (i.e. 'nav', 'mix')
+        self.agent_list = None  # Dict should be a list of agents n_agents by task (i.e. 'nav', 'mix')
         self.all_agents = None  # List of DOTSAgents
         self.multi_head = None
         self.knowledge_shape = None
@@ -404,7 +404,7 @@ class Scenario(BaseScenario):
             rdm_entities,
             self.world,
             env_index,
-            min_dist_between_entities=1,
+            min_dist_between_entities=0.5,
             x_bounds=(int(-self.arena_size / 2), int(self.arena_size / 2)),
             y_bounds=(int(-self.arena_size / 2), int(self.arena_size / 2))
         )
