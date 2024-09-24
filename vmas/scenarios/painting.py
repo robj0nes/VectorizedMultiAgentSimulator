@@ -404,7 +404,7 @@ class Scenario(BaseScenario):
             rdm_entities,
             self.world,
             env_index,
-            min_dist_between_entities=0.5,
+            min_dist_between_entities=0.75,
             x_bounds=(int(-self.arena_size / 2), int(self.arena_size / 2)),
             y_bounds=(int(-self.arena_size / 2), int(self.arena_size / 2))
         )
