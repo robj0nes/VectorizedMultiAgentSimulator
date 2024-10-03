@@ -1,10 +1,13 @@
 import math
-import typing
-from typing import List
+from typing import TypedDict, List, Callable, Iterable, Optional, Union, Dict
 
 import torch
 from torch import Tensor
 from sys import platform
+from torch_bp.bp import LoopyLinearGaussianBP
+from torch_bp.graph import FactorGraph
+from torch_bp.graph.factors import UnaryFactor, PairwiseFactor
+from torch_bp.graph.factors.linear_gaussian_factors import NaryGaussianLinearFactor
 
 # Importing rendering breaks BC/BP clusters
 if platform == "darwin":
@@ -18,10 +21,21 @@ from vmas.simulator.utils import Color, override
 class DOTSWorld(World):
     def __init__(self, batch_dim, device, **kwargs):
         super().__init__(batch_dim, device, **kwargs)
-        self.walls = None
-        self.device = device
         self.arena_size = 5
         self.viewer_zoom = 1.7
+        # TODO: Define physical constraints for all DOTS arena implementations.
+
+
+class DOTSGBPWorld(DOTSWorld):
+    def __init__(self, batch_dim, device, **kwargs):
+        super().__init__(batch_dim, device, **kwargs)
+
+
+class DOTSPaintingWorld(DOTSWorld):
+    def __init__(self, batch_dim, device, **kwargs):
+        super().__init__(batch_dim, device, **kwargs)
+        self.walls = None
+        self.device = device
 
     def spawn_map(self):
         self.walls = []
@@ -67,21 +81,48 @@ class DOTSWorld(World):
             )
 
 
-class DOTSComsNetwork(Agent):
-    """
-    Defines a separate 'agent' to represent an isolated communications network in the DOTS environment.
-    """
-
+class DOTSAgent(Agent):
     def __init__(self, name, **kwargs):
         super().__init__(name, **kwargs)
+    # TODO: Define physical constraints for any DOTS robot implementation.
 
-    @override(Agent)
+
+class DOTSGBPAgent(DOTSAgent):
+    class GBPDict(TypedDict):
+        num_nodes: int
+        factors: Iterable[Union[UnaryFactor, PairwiseFactor, NaryGaussianLinearFactor]]
+        factor_neighbours: Iterable[Iterable[int]]
+
+    def __init__(self, name, gbp_dict, **kwargs):
+        super().__init__(name, **kwargs)
+        self.gbp = self.initialise_gbp(gbp_dict)
+
+    def initialise_gbp(self,
+                       gbp_dict: GBPDict) -> LoopyLinearGaussianBP:
+        num_nodes = gbp_dict['num_nodes']
+        fac_grap = FactorGraph(num_nodes=num_nodes,
+                               factors=gbp_dict['factors'],
+                               factor_neighbours=gbp_dict['factor_neighbours'])
+        # TODO: Define these..
+        # Question: Should this be per-robot, or global..?
+        # Question: How to we handle adding/removing other robots - Rebuild the graph..?
+        #   If so, need to consider how this works with parallel environments.
+        node_means = torch.zeros(self._batch_dim, num_nodes, device=self._device)
+        node_covars = torch.zeros(self._batch_dim, num_nodes, device=self._device)
+        return LoopyLinearGaussianBP(node_means=node_means, node_covars=node_covars, factor_graph=fac_grap,
+                                     init_covar=1e5,
+                                     tensor_kwargs={'device': self._device, 'dtype': torch.float64})
+
     def render(self, env_index: int = 0) -> "List[Geom]":
-        geoms = []
-        return geoms
+        pass
+        # TODO: Handle GBP related rendering.
+
+    def action_script(self) -> Callable[[Agent, World], None]:
+        pass
+        # TODO: Handle GBP Implementation..
 
 
-class DOTSAgent(Agent):
+class DOTSPaintingAgent(DOTSAgent):
     def __init__(self, name, task, agent_index, render=True, knowledge_shape=None, **kwargs):
         super().__init__(name, **kwargs)
         self.rewards = dict()
@@ -148,6 +189,20 @@ class DOTSAgent(Agent):
         return geoms
 
 
+class DOTSComsNetwork(Agent):
+    """
+    Defines a separate 'agent' to represent an isolated communications network in the DOTS environment.
+    """
+
+    def __init__(self, name, **kwargs):
+        super().__init__(name, **kwargs)
+
+    @override(Agent)
+    def render(self, env_index: int = 0) -> "List[Geom]":
+        geoms = []
+        return geoms
+
+
 class DOTSAgentState(AgentState):
     def __init__(self, agent_index, knowledge_shape=None):
         super().__init__()
@@ -158,13 +213,10 @@ class DOTSAgentState(AgentState):
 
         # Has agent completed primary task and is now seeking goal.
         self._task_complete = None
-
-        # Has agent completed primary task and is now seeking goal.
         self._target_goal_index = None
 
         # Defines the agent knowledge(s)
         self._knowledge = None
-
 
     @property
     def reward_multiplier(self):
@@ -180,7 +232,6 @@ class DOTSAgentState(AgentState):
         ), f"Internal state must match batch dim, got {reward_multiplier.shape[0]}, expected {self._batch_dim}"
 
         self._reward_multiplier = reward_multiplier.to(self._device)
-
 
     @property
     def target_goal_index(self):
@@ -228,7 +279,7 @@ class DOTSAgentState(AgentState):
         self._knowledge = knowledge.to(self._device)
 
     @override(AgentState)
-    def _reset(self, env_index: typing.Optional[int]):
+    def _reset(self, env_index: Optional[int]):
         if self.task_complete is not None:
             if env_index is None:
                 self.task_complete[:] = False
@@ -331,7 +382,7 @@ class DOTSPayloadDestState(EntityState):
 
         self._solved = solved.to(self._device)
 
-    def _reset(self, env_index: typing.Optional[int]):
+    def _reset(self, env_index: Optional[int]):
         if self.expected_knowledge is not None:
             if env_index is None:
                 self.expected_knowledge[:] = 0

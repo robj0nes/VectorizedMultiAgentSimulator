@@ -9,6 +9,7 @@ from torch import Tensor
 
 from vmas import render_interactively
 from vmas.simulator.core import Agent, Entity, Landmark, Sphere, World
+from vmas.simulator.dots_core import DOTSGBPWorld, DOTSGBPAgent
 from vmas.simulator.heuristic_policy import BaseHeuristicPolicy
 from vmas.simulator.scenario import BaseScenario
 from vmas.simulator.sensors import Lidar
@@ -23,6 +24,7 @@ class Scenario(BaseScenario):
         self.plot_grid = False
         self.n_agents = kwargs.pop("n_agents", 4)
         self.collisions = kwargs.pop("collisions", True)
+        self.use_gbp = kwargs.pop("use_gbp", False)
 
         self.agents_with_same_goal = kwargs.pop("agents_with_same_goal", 1)
         self.split_goals = kwargs.pop("split_goals", False)
@@ -58,7 +60,10 @@ class Scenario(BaseScenario):
             ), "Splitting the goals is allowed when the agents are even and half the team has the same goal"
 
         # Make world
-        world = World(batch_dim, device, substeps=2)
+        if self.use_gbp:
+            world = DOTSGBPWorld(batch_dim, device)
+        else:
+            world = World(batch_dim, device, substeps=2)
 
         known_colors = [
             (0.22, 0.49, 0.72),
@@ -82,26 +87,55 @@ class Scenario(BaseScenario):
                 else colors[i - len(known_colors)]
             )
 
-            # Constraint: all agents have same action range and multiplier
-            agent = Agent(
-                name=f"agent_{i}",
-                collide=self.collisions,
-                color=color,
-                shape=Sphere(radius=self.agent_radius),
-                render_action=True,
-                sensors=(
-                    [
-                        Lidar(
-                            world,
-                            n_rays=12,
-                            max_range=self.lidar_range,
-                            entity_filter=entity_filter_agents,
-                        ),
-                    ]
-                    if self.collisions
-                    else None
-                ),
-            )
+            if self.use_gbp:
+                # TODO: Determine initial factors and neighbours..
+                gbp_dict = {
+                    'num_nodes': self.n_agents,
+                    'factors': [None],
+                    'factor_neighbours': [None]
+                }
+                agent = DOTSGBPAgent(
+                    name=f"agent_{i}",
+                    collide=self.collisions,
+                    color=color,
+                    shape=Sphere(radius=self.agent_radius),
+                    render_action=True,
+                    sensors=(
+                        [
+                            Lidar(
+                                world,
+                                n_rays=12,
+                                max_range=self.lidar_range,
+                                entity_filter=entity_filter_agents,
+                            ),
+                        ]
+                        if self.collisions
+                        else None
+                    ),
+                    gbp_dict=gbp_dict
+                )
+
+            else:
+                # Constraint: all agents have same action range and multiplier
+                agent = Agent(
+                    name=f"agent_{i}",
+                    collide=self.collisions,
+                    color=color,
+                    shape=Sphere(radius=self.agent_radius),
+                    render_action=True,
+                    sensors=(
+                        [
+                            Lidar(
+                                world,
+                                n_rays=12,
+                                max_range=self.lidar_range,
+                                entity_filter=entity_filter_agents,
+                            ),
+                        ]
+                        if self.collisions
+                        else None
+                    ),
+                )
             agent.pos_rew = torch.zeros(batch_dim, device=device)
             agent.agent_collision_rew = agent.pos_rew.clone()
             world.add_agent(agent)

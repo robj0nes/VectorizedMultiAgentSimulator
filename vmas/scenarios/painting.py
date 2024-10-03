@@ -12,7 +12,7 @@ if platform == "darwin":
     from vmas.simulator import rendering
 from vmas import render_interactively
 from vmas.simulator.core import Sphere, World, Box
-from vmas.simulator.dots_core import DOTSWorld, DOTSAgent, DOTSComsNetwork, DOTSPayloadDest
+from vmas.simulator.dots_core import DOTSPaintingWorld, DOTSPaintingAgent, DOTSComsNetwork, DOTSPayloadDest
 from vmas.simulator.scenario import BaseScenario
 from vmas.simulator.utils import AGENT_REWARD_TYPE, AGENT_OBS_TYPE, ScenarioUtils, Color
 
@@ -53,7 +53,7 @@ class Scenario(BaseScenario):
         # Agent properties
         self.agent_radius = None
         self.agent_list = None  # Dict should be a list of agents n_agents by task (i.e. 'nav', 'mix')
-        self.all_agents = None  # List of DOTSAgents
+        self.all_agents = None  # List of DOTSPaintingAgents
         self.multi_head = None
         self.knowledge_shape = None
         self.random_knowledge = None  # Is agent source knowledge randomly generated.
@@ -80,7 +80,7 @@ class Scenario(BaseScenario):
         self.define_task_properties(kwargs)
         self.define_reward_properties(batch_dim, device, kwargs)
 
-        world = DOTSWorld(batch_dim, device, collision_force=100, dim_c=self.dim_c)
+        world = DOTSPaintingWorld(batch_dim, device, collision_force=100, dim_c=self.dim_c)
 
         self.instantiate_goals(batch_dim, device, world)
         self.instantiate_agents(batch_dim, device, world)
@@ -172,7 +172,7 @@ class Scenario(BaseScenario):
             name_ext = ["nav-", "speak-", "listen-"]
             for ext in name_ext:
                 for i in range(self.n_agents):
-                    agent = DOTSAgent(
+                    agent = DOTSPaintingAgent(
                         name=f"{ext}agent_{i}",
                         shape=Sphere(self.agent_radius) if "nav" in ext else None,
                         collide=True if "nav" in ext else False,
@@ -210,7 +210,7 @@ class Scenario(BaseScenario):
 
         else:
             for i in range(self.n_agents):
-                agent = DOTSAgent(
+                agent = DOTSPaintingAgent(
                     name=f"agent_{i}",
                     shape=Sphere(self.agent_radius),
                     color=Color.GREEN,
@@ -546,7 +546,7 @@ class Scenario(BaseScenario):
     #  1. Implement a restriction on observations based on the self.observation_proximity value.
     #       - Maybe look at how lidar is implemented for hints on variable observation space..
 
-    def observation(self, agent: DOTSAgent) -> AGENT_OBS_TYPE:
+    def observation(self, agent: DOTSPaintingAgent) -> AGENT_OBS_TYPE:
         # Navigation Agents:
         #   Positional dist to target goal
         #   Own position
@@ -557,7 +557,7 @@ class Scenario(BaseScenario):
         # Listening Agents:
         #   Knowledge distance to target goal
         #   Own learnt knowledge.
-        if type(agent).__name__ == "DOTSAgent":
+        if type(agent).__name__ == "DOTSPaintingAgent":
             # TODO: Test if adding this reduces collisions/improves training.. first try suggests not.
             # Get vector norm distance to all other agents.
             if self.observe_other_agents and agent.task == "nav":
@@ -671,7 +671,7 @@ class Scenario(BaseScenario):
 
         return goals
 
-    def reward(self, agent: DOTSAgent) -> AGENT_REWARD_TYPE:
+    def reward(self, agent: DOTSPaintingAgent) -> AGENT_REWARD_TYPE:
         if agent == self.coms_network:
             # TODO: Consider if we want to implement some sort of reward signal for the coms network.. 
             return self.final_rew
@@ -822,8 +822,8 @@ class Scenario(BaseScenario):
     def done(self):
         return torch.all(self.completed_goals, dim=-1)
 
-    def info(self, agent: DOTSAgent) -> dict:
-        if type(agent).__name__ == "DOTSAgent":
+    def info(self, agent: DOTSPaintingAgent) -> dict:
+        if type(agent).__name__ == "DOTSPaintingAgent":
             if agent.task == "listen":
                 return {
                     "mix_shaping": agent.rewards["shaping"] * agent.state.reward_multiplier,
@@ -864,7 +864,7 @@ class Scenario(BaseScenario):
                 "final_rew": self.final_rew
             }
 
-    def mix_knowledge(self, agent: DOTSAgent):
+    def mix_knowledge(self, agent: DOTSPaintingAgent):
         """
         Uses the agent coms signal (c[0]) to determine if mix is desired.
         Uses the other agent coms signal (c[1:]) to read the communicated knowledge.
@@ -950,7 +950,7 @@ class Scenario(BaseScenario):
         # self.debug_coms_signals(agent, com_knowledge, any_in_prox, in_prox, new_mix)
         agent.state.knowledge[:, 1, :] = new_mix
 
-    def set_new_goals(self, agent: DOTSAgent):
+    def set_new_goals(self, agent: DOTSPaintingAgent):
         # We only want to do this once for multi-head agents
         if agent.task == "nav":
             # Stack truth values for an agents target goal index across num goals.
@@ -1025,7 +1025,7 @@ class Scenario(BaseScenario):
                 elif cp.task == "speak":
                     cp.coms_shaping_norm[task_complete] = cp.coms_shaping[task_complete].clone()
 
-    def process_action(self, agent: DOTSAgent):
+    def process_action(self, agent: DOTSPaintingAgent):
         self.set_new_goals(agent)
         if agent.task != "nav":
             if self.multi_head:
