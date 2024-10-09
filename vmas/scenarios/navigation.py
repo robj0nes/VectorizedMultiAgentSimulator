@@ -7,9 +7,10 @@ from typing import Callable, Dict, List
 import torch
 from torch import Tensor
 
+from torch_bp.graph.factors.linear_gaussian_factors import PairwiseGaussianLinearFactor, UnaryGaussianLinearFactor
 from vmas import render_interactively
 from vmas.simulator.core import Agent, Entity, Landmark, Sphere, World
-from vmas.simulator.dots_core import DOTSGBPWorld, DOTSGBPAgent
+from vmas.simulator.dots_core import DOTSGBPWorld, DOTSGBPAgent, DOTSAgent
 from vmas.simulator.heuristic_policy import BaseHeuristicPolicy
 from vmas.simulator.scenario import BaseScenario
 from vmas.simulator.sensors import Lidar
@@ -55,8 +56,8 @@ class Scenario(BaseScenario):
         # agents_with_same_goal = 1: all independent goals
         if self.split_goals:
             assert (
-                self.n_agents % 2 == 0
-                and self.agents_with_same_goal == self.n_agents // 2
+                    self.n_agents % 2 == 0
+                    and self.agents_with_same_goal == self.n_agents // 2
             ), "Splitting the goals is allowed when the agents are even and half the team has the same goal"
 
         # Make world
@@ -88,12 +89,6 @@ class Scenario(BaseScenario):
             )
 
             if self.use_gbp:
-                # TODO: Determine initial factors and neighbours..
-                gbp_dict = {
-                    'num_nodes': self.n_agents,
-                    'factors': [None],
-                    'factor_neighbours': [None]
-                }
                 agent = DOTSGBPAgent(
                     name=f"agent_{i}",
                     collide=self.collisions,
@@ -112,7 +107,7 @@ class Scenario(BaseScenario):
                         if self.collisions
                         else None
                     ),
-                    gbp_dict=gbp_dict
+                    tensor_args={"batch_dim": batch_dim, "device": device}
                 )
 
             else:
@@ -184,6 +179,9 @@ class Scenario(BaseScenario):
             occupied_positions = torch.cat([occupied_positions, position], dim=1)
 
         for i, agent in enumerate(self.world.agents):
+            if self.use_gbp:
+                agent.init_factor_graph(self.n_agents, n_goals=self.n_agents)
+
             if self.split_goals:
                 goal_index = int(i // self.agents_with_same_goal)
             else:
@@ -193,18 +191,18 @@ class Scenario(BaseScenario):
 
             if env_index is None:
                 agent.pos_shaping = (
-                    torch.linalg.vector_norm(
-                        agent.state.pos - agent.goal.state.pos,
-                        dim=1,
-                    )
-                    * self.pos_shaping_factor
+                        torch.linalg.vector_norm(
+                            agent.state.pos - agent.goal.state.pos,
+                            dim=1,
+                        )
+                        * self.pos_shaping_factor
                 )
             else:
                 agent.pos_shaping[env_index] = (
-                    torch.linalg.vector_norm(
-                        agent.state.pos[env_index] - agent.goal.state.pos[env_index]
-                    )
-                    * self.pos_shaping_factor
+                        torch.linalg.vector_norm(
+                            agent.state.pos[env_index] - agent.goal.state.pos[env_index]
+                        )
+                        * self.pos_shaping_factor
                 )
 
     def reward(self, agent: Agent):
@@ -233,10 +231,10 @@ class Scenario(BaseScenario):
                         distance = self.world.get_distance(a, b)
                         a.agent_collision_rew[
                             distance <= self.min_collision_distance
-                        ] += self.agent_collision_penalty
+                            ] += self.agent_collision_penalty
                         b.agent_collision_rew[
                             distance <= self.min_collision_distance
-                        ] += self.agent_collision_penalty
+                            ] += self.agent_collision_penalty
 
         pos_reward = self.pos_rew if self.shared_rew else agent.pos_rew
         return pos_reward + self.final_rew + agent.agent_collision_rew
@@ -322,6 +320,16 @@ class Scenario(BaseScenario):
         return geoms
 
 
+# def iterate_gbp():
+#     print()
+#     # TODO: Handle GBP Implementation..
+#     #   1. Update factors
+#     #       - Add new estimated robot position
+#     #   2. Handle message passing?
+#     #   3. TBC....
+#     pass
+
+
 class HeuristicPolicy(BaseHeuristicPolicy):
     def __init__(self, clf_epsilon=0.2, clf_slack=100.0, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -357,19 +365,19 @@ class HeuristicPolicy(BaseHeuristicPolicy):
 
         # Laypunov function
         V_value = (
-            (agent_pos[:, X] - goal_pos[:, X]) ** 2
-            + 0.5 * (agent_pos[:, X] - goal_pos[:, X]) * agent_vel[:, X]
-            + agent_vel[:, X] ** 2
-            + (agent_pos[:, Y] - goal_pos[:, Y]) ** 2
-            + 0.5 * (agent_pos[:, Y] - goal_pos[:, Y]) * agent_vel[:, Y]
-            + agent_vel[:, Y] ** 2
+                (agent_pos[:, X] - goal_pos[:, X]) ** 2
+                + 0.5 * (agent_pos[:, X] - goal_pos[:, X]) * agent_vel[:, X]
+                + agent_vel[:, X] ** 2
+                + (agent_pos[:, Y] - goal_pos[:, Y]) ** 2
+                + 0.5 * (agent_pos[:, Y] - goal_pos[:, Y]) * agent_vel[:, Y]
+                + agent_vel[:, Y] ** 2
         )
 
         LfV_val = (2 * (agent_pos[:, X] - goal_pos[:, X]) + agent_vel[:, X]) * (
             agent_vel[:, X]
         ) + (2 * (agent_pos[:, Y] - goal_pos[:, Y]) + agent_vel[:, Y]) * (
-            agent_vel[:, Y]
-        )
+                      agent_vel[:, Y]
+                  )
         LgV_vals = torch.stack(
             [
                 0.5 * (agent_pos[:, X] - goal_pos[:, X]) + 2 * agent_vel[:, X],
@@ -389,7 +397,7 @@ class HeuristicPolicy(BaseHeuristicPolicy):
         constraints = []
 
         # QP Cost F = u^T @ u + clf_slack**2
-        qp_objective = cp.Minimize(cp.sum_squares(u) + self.clf_slack * clf_slack**2)
+        qp_objective = cp.Minimize(cp.sum_squares(u) + self.clf_slack * clf_slack ** 2)
 
         # control bounds between u_range
         constraints += [u <= u_range]
