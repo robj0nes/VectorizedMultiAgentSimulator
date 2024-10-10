@@ -7,10 +7,9 @@ from typing import Callable, Dict, List
 import torch
 from torch import Tensor
 
-from torch_bp.graph.factors.linear_gaussian_factors import PairwiseGaussianLinearFactor, UnaryGaussianLinearFactor
 from vmas import render_interactively
 from vmas.simulator.core import Agent, Entity, Landmark, Sphere, World
-from vmas.simulator.dots_core import DOTSGBPWorld, DOTSGBPAgent, DOTSAgent
+from vmas.simulator.dots_core import DOTSGBPWorld, DOTSGBPAgent
 from vmas.simulator.heuristic_policy import BaseHeuristicPolicy
 from vmas.simulator.scenario import BaseScenario
 from vmas.simulator.sensors import Lidar
@@ -252,6 +251,10 @@ class Scenario(BaseScenario):
         return agent.pos_rew
 
     def observation(self, agent: Agent):
+        if self.use_gbp:
+            # Process GBP msg passing before taking observations.
+            self.world.iterate_gbp(agent)
+
         goal_poses = []
         if self.observe_all_goals:
             for a in self.world.agents:
@@ -275,6 +278,7 @@ class Scenario(BaseScenario):
     def done(self):
         return torch.stack(
             [
+
                 torch.linalg.vector_norm(
                     agent.state.pos - agent.goal.state.pos,
                     dim=-1,
@@ -294,7 +298,6 @@ class Scenario(BaseScenario):
 
     def extra_render(self, env_index: int = 0) -> "List[Geom]":
         from vmas.simulator import rendering
-
         geoms: List[Geom] = []
 
         # Communication lines
@@ -318,16 +321,6 @@ class Scenario(BaseScenario):
                     geoms.append(line)
 
         return geoms
-
-
-# def iterate_gbp():
-#     print()
-#     # TODO: Handle GBP Implementation..
-#     #   1. Update factors
-#     #       - Add new estimated robot position
-#     #   2. Handle message passing?
-#     #   3. TBC....
-#     pass
 
 
 class HeuristicPolicy(BaseHeuristicPolicy):

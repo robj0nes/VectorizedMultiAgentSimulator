@@ -28,11 +28,6 @@ class DOTSWorld(World):
         # TODO: Define physical constraints for all DOTS arena implementations.
 
 
-class DOTSGBPWorld(DOTSWorld):
-    def __init__(self, batch_dim, device, **kwargs):
-        super().__init__(batch_dim, device, **kwargs)
-
-
 class DOTSPaintingWorld(DOTSWorld):
     def __init__(self, batch_dim, device, **kwargs):
         super().__init__(batch_dim, device, **kwargs)
@@ -101,14 +96,18 @@ class DOTSGBPAgent(DOTSAgent):
         self.gbp = None
 
     def unary_anchor_fn(self, x: torch.Tensor):
-        batch_shape = x.shape[:-1]
+        batch_shape = x.shape[:1]
         grad = torch.eye(x.shape[-1], dtype=x.dtype).repeat(batch_shape + (1, 1))
+
         return grad, x
 
     def pairwise_dist_fn(self, x: torch.Tensor):
-        h_fn = lambda x: torch.linalg.norm(x[:2] - x[2:])
+        h_fn = lambda x: torch.linalg.norm(x[:, 2:] - x[:, :2], dim=-1)
         grad_fn = torch.func.jacrev(h_fn)
-        return grad_fn(x)[None, :], h_fn(x)
+        grad_x = grad_fn(x).diagonal(dim1=0, dim2=1).transpose(1, 0)
+        print(grad_x[:, None, :].shape)
+
+        return grad_x[:, None, :], h_fn(x)
 
     def init_factor_graph(self, n_agents, n_goals):
         """Initialise a base FG to assign to all robots. This implementation defines factors between
@@ -136,6 +135,7 @@ class DOTSGBPAgent(DOTSAgent):
                                                            self.batch_dim, 1, 1),
                                                        self.init_mu[:, 0].to(self.device),
                                                        True)
+        factor_neighbours.append([0])
 
         # Position factors are the `pvn_count` most recent position estimates:
         position_factors = [PairwiseGaussianLinearFactor(self.pairwise_dist_fn,
@@ -193,13 +193,26 @@ class DOTSGBPAgent(DOTSAgent):
                                                     'dtype': torch.float64},
                                      batch_dim=self.batch_dim)
 
-    def iterate_gbp(self):
-        print()
-        pass
-
     def render(self, env_index: int = 0) -> "List[Geom]":
+        print()
         # TODO: Handle GBP related rendering.
         return []
+
+
+class DOTSGBPWorld(DOTSWorld):
+    def __init__(self, batch_dim, device, **kwargs):
+        super().__init__(batch_dim, device, **kwargs)
+
+    def iterate_gbp(self, agent: DOTSGBPAgent):
+        # can take nodes-to-solve as arg.
+        agent.gbp.solve(num_iters=1, msg_pass_per_iter=1)
+        # print(f"Calling GBP iteration for: {agent.name}")
+        # TODO: Handle GBP Implementation..
+        #   1. Update factors
+        #       - Add new estimated robot position
+        #   2. Handle message passing?
+        #   3. TBC....
+        pass
 
 
 class DOTSPaintingAgent(DOTSAgent):
