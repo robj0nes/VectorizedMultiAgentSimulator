@@ -8,6 +8,7 @@ import torch
 from torch import Tensor
 
 from vmas import render_interactively
+from vmas.simulator.gbp import GaussianBeliefPropogation
 from vmas.simulator.core import Agent, Entity, Landmark, Sphere, World
 from vmas.simulator.dots_core import DOTSGBPWorld, DOTSGBPAgent, DOTSGBPGoal
 from vmas.simulator.heuristic_policy import BaseHeuristicPolicy
@@ -90,8 +91,22 @@ class Scenario(BaseScenario):
             if self.use_gbp:
                 entity_filter_agents: Callable[[Entity], bool] = lambda e: isinstance(e, DOTSGBPAgent)
                 entity_filter_goals: Callable[[Entity], bool] = lambda e: isinstance(e, DOTSGBPGoal)
+                # We assume the 'self' is node 0
+                graph_dict = {
+                    'robots': {
+                        'nodes': [0, 1, 2, 3],
+                        'edges': [[0, 1], [0, 2], [0, 3]]
+                    },
+                    'goals': {
+                        'nodes': [4, 5, 6, 7],
+                        'edges': [[0, 4], [0, 5], [0, 6], [0, 7]]
+                    }
+                }
+
+                gbp = GaussianBeliefPropogation(graph_dict=graph_dict, batch_dim=batch_dim, device=device)
                 agent = DOTSGBPAgent(
                     name=f"agent_{i}",
+                    gbp=gbp,
                     collide=self.collisions,
                     color=color,
                     shape=Sphere(radius=self.agent_radius),
@@ -194,7 +209,7 @@ class Scenario(BaseScenario):
 
         for i, agent in enumerate(self.world.agents):
             if self.use_gbp:
-                agent.init_factor_graph(self.n_agents, n_goals=self.n_agents)
+                agent.gbp.update_anchor(agent.state.pos, anchor_index=0)
 
             if self.split_goals:
                 goal_index = int(i // self.agents_with_same_goal)
