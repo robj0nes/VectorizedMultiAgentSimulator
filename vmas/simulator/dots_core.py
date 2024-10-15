@@ -1,10 +1,14 @@
 import math
+import time
+import numpy as np
 from typing import TypedDict, List, Callable, Iterable, Optional, Union, Dict
 
 import torch
+from matplotlib import pyplot as plt
 from tensordict import TensorDict
 from torch import Tensor
 from sys import platform
+import torch_bp.distributions as dist
 from torch_bp.bp import LoopyLinearGaussianBP
 from torch_bp.graph import FactorGraph
 from torch_bp.graph.factors import UnaryFactor, PairwiseFactor
@@ -93,21 +97,20 @@ class DOTSGBPAgent(DOTSAgent):
         self.factor_neighbours = None
         self.init_mu = None
         self.init_covar = None
+        self.means = None
+        self.covars = None
         self.gbp = None
 
     def unary_anchor_fn(self, x: torch.Tensor):
         batch_shape = x.shape[:1]
         grad = torch.eye(x.shape[-1], dtype=x.dtype).repeat(batch_shape + (1, 1))
-
         return grad, x
 
     def pairwise_dist_fn(self, x: torch.Tensor):
         h_fn = lambda x: torch.linalg.norm(x[:, 2:] - x[:, :2], dim=-1)
         grad_fn = torch.func.jacrev(h_fn)
         grad_x = grad_fn(x).diagonal(dim1=0, dim2=1).transpose(1, 0)
-        print(grad_x[:, None, :].shape)
-
-        return grad_x[:, None, :], h_fn(x)
+        return grad_x[:, None, :], h_fn(x).unsqueeze(-1)
 
     def init_factor_graph(self, n_agents, n_goals):
         """Initialise a base FG to assign to all robots. This implementation defines factors between
@@ -117,102 +120,145 @@ class DOTSGBPAgent(DOTSAgent):
         #   - Initialise the graph with 'zero' factors between known relationships
         #   - As the task evolves we introduce factors where necessary,
         #       but must be introduced across all batched envs (batch_dim)
-
-        pvn_count = 5  # position variable nodes.
-        gvn_count = n_goals  # goal variable nodes
+        pvn_count = 1  # position variable nodes.
+        gvn_count = 0  # goal variable nodes
         rvn_count = n_agents - 1  # robot variable nodes
         self.total_nodes = pvn_count + gvn_count + rvn_count
 
         sigma = 0.05
-        self.init_mu = torch.randn(self.batch_dim, self.total_nodes, 2) * 2 + 2
-        self.init_covar = torch.eye(2).repeat(self.batch_dim, self.total_nodes, 1, 1) * 2
+        self.init_node_mu = (torch.randn(self.batch_dim, self.total_nodes, 2) * 2 + 2).to(self.device, dtype=torch.float64)
+        self.init_node_covar = (torch.eye(2).repeat(self.batch_dim, self.total_nodes, 1, 1) * 2).to(self.device, dtype=torch.float64)
         factor_neighbours = []
 
-        position_grounding = UnaryGaussianLinearFactor(self.unary_anchor_fn,
+        anchor_factors = [UnaryGaussianLinearFactor(self.unary_anchor_fn,
                                                        # Get position
-                                                       torch.as_tensor(self.state.pos).to(self.device),
-                                                       sigma * torch.eye(2, device=self.device).unsqueeze(0).repeat(
-                                                           self.batch_dim, 1, 1),
-                                                       self.init_mu[:, 0].to(self.device),
+                                                       self.state.pos if i == 0 else torch.zeros_like(self.state.pos),
+                                                       sigma * torch.eye(2, device=self.device, dtype=torch.float64)
+                                                            .unsqueeze(0).repeat(self.batch_dim, 1, 1),
+                                                       self.init_node_mu[:, 0].to(self.device),
                                                        True)
-        factor_neighbours.append([0])
+                          for i in range(self.total_nodes)]
+        factor_neighbours.extend([(i,) for i in range(self.total_nodes)])
 
+
+        # initial z_bias: [batch_dim, 1], covar: [batch_dim, 1, 1]
+        self.init_dist_z_bias = (1.0 * torch.ones(1, device=self.device, dtype=torch.float64)
+                                 .unsqueeze(0).repeat(self.batch_dim, 1))
+        self.init_dist_covar = (2 * sigma * torch.eye(1, device=self.device, dtype=torch.float64)
+                                .unsqueeze(0).repeat(self.batch_dim, 1, 1))
+
+        # x_0 is a concatenated tensor of shape [batch_dim, mu_i + mu_j]
         # Position factors are the `pvn_count` most recent position estimates:
         position_factors = [PairwiseGaussianLinearFactor(self.pairwise_dist_fn,
-                                                         1.0 * torch.ones(self.batch_dim, 1).to(self.device),
-                                                         2 * sigma * torch.eye(1, device=self.device).unsqueeze(
-                                                             0).repeat(
-                                                             self.batch_dim, 1, 1),
-                                                         torch.concat((self.init_mu[:, i], self.init_mu[:, j]),
-                                                                      dim=-1).to(
-                                                             self.device),
+                                                         self.init_dist_z_bias,
+                                                         self.init_dist_covar,
+                                                         torch.concat(
+                                                             (self.init_node_mu[:, i], self.init_node_mu[:, j]),
+                                                             dim=-1).to(self.device),
                                                          False)
                             for i, j in zip(range(pvn_count - 1), range(1, pvn_count))]
-
-        factor_neighbours.extend([n, n + 1] for n in range(pvn_count - 1))
+        factor_neighbours.extend((n, n + 1) for n in range(pvn_count - 1))
 
         # Goal factors exist for the distance estimate between the robots most recent position and the goal:
         #   factors:[pvn:pvn+gvn]
         goal_factors = [PairwiseGaussianLinearFactor(self.pairwise_dist_fn,
-                                                     1.0 * torch.ones(self.batch_dim, 1).to(self.device),
-                                                     2 * sigma * torch.eye(1, device=self.device).unsqueeze(0).repeat(
-                                                         self.batch_dim, 1, 1),
-                                                     torch.concat((self.init_mu[:,
-                                                                   i], self.init_mu[:, j]), dim=-1).to(self.device),
+                                                     self.init_dist_z_bias,
+                                                     self.init_dist_covar,
+                                                     torch.concat(
+                                                         (self.init_node_mu[:, 0], self.init_node_mu[:, i])
+                                                         , dim=-1).to(self.device),
                                                      False)
-                        for i, j in zip(range(pvn_count, pvn_count + gvn_count - 1),
-                                        range(pvn_count + 1, pvn_count + gvn_count))]
-        factor_neighbours.extend([0, n] for n in range(pvn_count,
+                        for i in range(pvn_count, pvn_count + gvn_count)]
+        factor_neighbours.extend((0, n) for n in range(pvn_count,
                                                        pvn_count + gvn_count))
 
         # Robot factors exist for the distance between a neighbouring robot and the most recent position:
         #   factors:[pvn+gvn:pvn+gvn+rvn]
         robot_factors = [PairwiseGaussianLinearFactor(self.pairwise_dist_fn,
-                                                      1.0 * torch.ones(self.batch_dim, 1).to(self.device),
-                                                      2 * sigma * torch.eye(1, device=self.device).unsqueeze(0).repeat(
-                                                          self.batch_dim, 1, 1),
-                                                      torch.concat((self.init_mu[:,
-                                                                    i], self.init_mu[:, j]), dim=-1).to(self.device),
+                                                      self.init_dist_z_bias,
+                                                      self.init_dist_covar,
+                                                      torch.concat(
+                                                          (self.init_node_mu[:, 0], self.init_node_mu[:, i]),
+                                                          dim=-1).to(self.device),
                                                       False)
-                         for i, j in zip(range(pvn_count + gvn_count, self.total_nodes - 1),
-                                         range(pvn_count + gvn_count + 1, self.total_nodes))]
-        factor_neighbours.extend([0, n] for n in range(pvn_count + gvn_count,
+                         for i in range(pvn_count + gvn_count, self.total_nodes)]
+
+
+        factor_neighbours.extend((0, n) for n in range(pvn_count + gvn_count,
                                                        self.total_nodes))
 
-        self.factors = [position_grounding] + position_factors + goal_factors + robot_factors
+        self.factors = anchor_factors + position_factors + goal_factors + robot_factors
         self.factor_neighbours = factor_neighbours
         self.gbp = self.initialise_gbp()
+        self.iterate_gbp()
 
     def initialise_gbp(self) -> LoopyLinearGaussianBP:
         fac_grap = FactorGraph(num_nodes=self.total_nodes,
                                factors=self.factors,
                                factor_neighbours=self.factor_neighbours)
 
-        return LoopyLinearGaussianBP(node_means=self.init_mu, node_covars=self.init_covar, factor_graph=fac_grap,
+        return LoopyLinearGaussianBP(node_means=self.init_node_mu, node_covars=self.init_node_covar, factor_graph=fac_grap,
                                      tensor_kwargs={'device': self.device,
                                                     'dtype': torch.float64},
                                      batch_dim=self.batch_dim)
 
+    def iterate_gbp(self, num_iters=1, msg_pass_per_iter=1):
+        self.means, self.covars = self.gbp.solve(num_iters=num_iters, msg_pass_per_iter=msg_pass_per_iter)
+        self.vars = torch.diagonal(self.covars, dim1=-2, dim2=-1)
+        self.stds = torch.sqrt(self.vars)
+        # Note: position estimates are just sampled from the current node mean aod covars.. not very reliable??
+        self.position_estimates = torch.normal(self.means, self.stds)
+
+
+    def estimate_other_agent_pos_from_lidar(self):
+        agent_detections = (self.sensors[0]._max_range - self.sensors[0].measure()).to(self.device)
+        own_pos_est = self.position_estimates[:, 0]
+        other_agent_xs = (own_pos_est[:, 0] + agent_detections * torch.cos(self.sensors[0]._angles)).to(self.device)
+        other_agent_ys = (own_pos_est[:, 1] + agent_detections * torch.sin(self.sensors[0]._angles)).to(self.device)
+        other_agent_positions = torch.stack((other_agent_xs, other_agent_ys), dim=-1)
+        self.other_agent_positions = other_agent_positions[agent_detections > 0]
+
     def render(self, env_index: int = 0) -> "List[Geom]":
-        print()
-        # TODO: Handle GBP related rendering.
-        return []
+        geoms = super().render(env_index)
+        if '0' in self.name:
+            # for means, covars in zip(self.means[env_index], self.covars[env_index]):
+            gaussians = [dist.Gaussian(mu, sigma, device=self.device) for mu, sigma in zip(self.means[env_index], self.covars[env_index])]
+            for i, g in enumerate(gaussians):
+                # eval gaussian in worldspace TODO: Get arena dims.
+                X, Y, Z = g.eval_grid([-2, 2, -2, 2], n_samples=200)
+                locs = np.where(Z > 0.5)
+                marker_pos = [(Y[locs[1][i]][0], X[0][locs[0][i]], Z[locs[0][i]][locs[1][i]]) for i in range(len(locs[0]))]
+                if len(marker_pos) > 0:
+                    zs = [m[2] for m in marker_pos]
+                    min_zs = np.min(zs)
+                    max_zs = np.max(zs)
+                    norm_markers = [(mp[0], mp[1], (mp[2] - min_zs) / (max_zs - min_zs)) for mp in marker_pos]
+                    for m in norm_markers:
+                        marker = rendering.make_circle(radius=0.005, filled=True)
+                        marker.set_color(*self.color, alpha=m[2] - 0.25)
+                        marker_xform = rendering.Transform()
+                        marker_xform.set_translation(m[0], m[1])
+                        marker.add_attr(marker_xform)
+                        geoms.append(marker)
+        return geoms
 
 
 class DOTSGBPWorld(DOTSWorld):
     def __init__(self, batch_dim, device, **kwargs):
         super().__init__(batch_dim, device, **kwargs)
 
-    def iterate_gbp(self, agent: DOTSGBPAgent):
-        # can take nodes-to-solve as arg.
-        agent.gbp.solve(num_iters=1, msg_pass_per_iter=1)
-        # print(f"Calling GBP iteration for: {agent.name}")
-        # TODO: Handle GBP Implementation..
-        #   1. Update factors
-        #       - Add new estimated robot position
-        #   2. Handle message passing?
-        #   3. TBC....
-        pass
+    def update_and_iterate_gbp(self, agent: DOTSGBPAgent):
+
+        agent.estimate_other_agent_pos_from_lidar()
+        # TODO: Update GBP nodes according to detected agent position estimates..
+        #  Need to work out how to identify which agent we've detected..!
+
+        agent.iterate_gbp(num_iters=1, msg_pass_per_iter=1)
+
+# Currently used to distinguish goal landmarks with Lidar filters.
+class DOTSGBPGoal(Landmark):
+    def __init__(self,  **kwargs):
+        super().__init__(**kwargs)
 
 
 class DOTSPaintingAgent(DOTSAgent):

@@ -9,7 +9,7 @@ from torch import Tensor
 
 from vmas import render_interactively
 from vmas.simulator.core import Agent, Entity, Landmark, Sphere, World
-from vmas.simulator.dots_core import DOTSGBPWorld, DOTSGBPAgent
+from vmas.simulator.dots_core import DOTSGBPWorld, DOTSGBPAgent, DOTSGBPGoal
 from vmas.simulator.heuristic_policy import BaseHeuristicPolicy
 from vmas.simulator.scenario import BaseScenario
 from vmas.simulator.sensors import Lidar
@@ -88,6 +88,8 @@ class Scenario(BaseScenario):
             )
 
             if self.use_gbp:
+                entity_filter_agents: Callable[[Entity], bool] = lambda e: isinstance(e, DOTSGBPAgent)
+                entity_filter_goals: Callable[[Entity], bool] = lambda e: isinstance(e, DOTSGBPGoal)
                 agent = DOTSGBPAgent(
                     name=f"agent_{i}",
                     collide=self.collisions,
@@ -102,6 +104,12 @@ class Scenario(BaseScenario):
                                 max_range=self.lidar_range,
                                 entity_filter=entity_filter_agents,
                             ),
+                            Lidar(
+                                world,
+                                n_rays=12,
+                                max_range=self.lidar_range,
+                                entity_filter=entity_filter_goals,
+                            )
                         ]
                         if self.collisions
                         else None
@@ -135,11 +143,18 @@ class Scenario(BaseScenario):
             world.add_agent(agent)
 
             # Add goals
-            goal = Landmark(
-                name=f"goal {i}",
-                collide=False,
-                color=color,
-            )
+            if self.use_gbp:
+                goal = DOTSGBPGoal(
+                    name=f"goal {i}",
+                    collide=True,
+                    color=color,
+                )
+            else:
+                goal = Landmark(
+                    name=f"goal {i}",
+                    collide=False,
+                    color=color,
+                )
             world.add_landmark(goal)
             agent.goal = goal
 
@@ -253,7 +268,7 @@ class Scenario(BaseScenario):
     def observation(self, agent: Agent):
         if self.use_gbp:
             # Process GBP msg passing before taking observations.
-            self.world.iterate_gbp(agent)
+            self.world.update_and_iterate_gbp(agent)
 
         goal_poses = []
         if self.observe_all_goals:
@@ -426,4 +441,6 @@ if __name__ == "__main__":
     render_interactively(
         __file__,
         control_two_agents=True,
+        use_gbp=True,
+        lidar_range=0.5
     )
