@@ -13,7 +13,7 @@ from vmas.simulator.core import Agent, Entity, Landmark, Sphere, World
 from vmas.simulator.dots_core import DOTSGBPWorld, DOTSGBPAgent, DOTSGBPGoal
 from vmas.simulator.heuristic_policy import BaseHeuristicPolicy
 from vmas.simulator.scenario import BaseScenario
-from vmas.simulator.sensors import Lidar
+from vmas.simulator.sensors import ObjectDectionCamera
 from vmas.simulator.utils import Color, ScenarioUtils, X, Y
 
 if typing.TYPE_CHECKING:
@@ -94,16 +94,17 @@ class Scenario(BaseScenario):
                 # We assume the 'self' is node 0
                 graph_dict = {
                     'robots': {
-                        'nodes': [0, 1, 2, 3],
-                        'edges': [[0, 1], [0, 2], [0, 3]]
+                        'nodes': [i for i in range(self.n_agents)],
+                        'edges': [[0, i] for i in range(1, self.n_agents)]
                     },
-                    'goals': {
-                        'nodes': [4, 5, 6, 7],
-                        'edges': [[0, 4], [0, 5], [0, 6], [0, 7]]
-                    }
+                    # 'goals': {
+                    #     'nodes': [4, 5, 6, 7],
+                    #     'edges': [[0, 4], [0, 5], [0, 6], [0, 7]]
+                    # }
                 }
 
                 gbp = GaussianBeliefPropogation(graph_dict=graph_dict, batch_dim=batch_dim, device=device)
+                # Note: For now assumes n_agents == n_goals
                 agent = DOTSGBPAgent(
                     name=f"agent_{i}",
                     gbp=gbp,
@@ -111,17 +112,24 @@ class Scenario(BaseScenario):
                     color=color,
                     shape=Sphere(radius=self.agent_radius),
                     render_action=True,
+                    world=world,
+                    n_agents=self.n_agents,
+                    n_goals=self.n_agents,
                     sensors=(
                         [
-                            Lidar(
+                            ObjectDectionCamera(
                                 world,
-                                n_rays=12,
+                                angle_start=0,
+                                angle_end=2 * torch.pi,
+                                n_rays=16,
                                 max_range=self.lidar_range,
                                 entity_filter=entity_filter_agents,
                             ),
-                            Lidar(
+                            ObjectDectionCamera(
                                 world,
-                                n_rays=12,
+                                angle_start=0,
+                                angle_end=2 * torch.pi,
+                                n_rays=16,
                                 max_range=self.lidar_range,
                                 entity_filter=entity_filter_goals,
                             )
@@ -158,18 +166,11 @@ class Scenario(BaseScenario):
             world.add_agent(agent)
 
             # Add goals
-            if self.use_gbp:
-                goal = DOTSGBPGoal(
-                    name=f"goal {i}",
-                    collide=True,
-                    color=color,
-                )
-            else:
-                goal = Landmark(
-                    name=f"goal {i}",
-                    collide=False,
-                    color=color,
-                )
+            goal = Landmark(
+                name=f"goal {i}",
+                collide=False,
+                color=color,
+            )
             world.add_landmark(goal)
             agent.goal = goal
 
@@ -209,6 +210,7 @@ class Scenario(BaseScenario):
 
         for i, agent in enumerate(self.world.agents):
             if self.use_gbp:
+                # Update our robot position anchor with the starting position.
                 agent.gbp.update_anchor(agent.state.pos, anchor_index=0)
 
             if self.split_goals:
@@ -284,6 +286,9 @@ class Scenario(BaseScenario):
         if self.use_gbp:
             # Process GBP msg passing before taking observations.
             self.world.update_and_iterate_gbp(agent)
+            sensor_meaurements = agent.sensors[0]._max_range - agent.sensors[0].measure()[0]
+        else:
+            sensor_meaurements = agent.sensors[0]._max_range - agent.sensors[0].measure()
 
         goal_poses = []
         if self.observe_all_goals:
@@ -298,7 +303,7 @@ class Scenario(BaseScenario):
             ]
             + goal_poses
             + (
-                [agent.sensors[0]._max_range - agent.sensors[0].measure()]
+                [sensor_meaurements]
                 if self.collisions
                 else []
             ),
@@ -457,5 +462,5 @@ if __name__ == "__main__":
         __file__,
         control_two_agents=True,
         use_gbp=True,
-        lidar_range=0.5
+        lidar_range=0.2
     )

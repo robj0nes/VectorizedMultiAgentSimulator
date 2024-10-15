@@ -49,7 +49,6 @@ class GaussianBeliefPropogation():
         self.initialise_factor_graph()
         self.gbp = self.initialise_gbp()
 
-        self.position_estimates = None
         self.current_means = None
         self.current_covars = None
 
@@ -76,7 +75,7 @@ class GaussianBeliefPropogation():
                                                     'dtype': torch.float64},
                                      batch_dim=self.batch_dim)
 
-    def initialise_factor_graph(self, position=None):
+    def initialise_factor_graph(self):
         """Initialise a base FG to assign to all robots. This implementation defines factors between
         robots own positions, other robot positions, and goal positions."""
         # Note:
@@ -117,15 +116,19 @@ class GaussianBeliefPropogation():
             self.factors.extend(dist_factors)
 
 
-    def update_anchor(self, x: torch.Tensor, anchor_index: int):
+    def update_anchor(self, x: torch.Tensor, anchor_index: int, env_index=None):
+        factor = self.gbp.factor_graph.factor_clusters[anchor_index]
         factor_energy = self.gbp.factor_graph.factor_clusters[anchor_index].factor.nary_factor.energy_fn
-        factor_energy._energy_eta = x.double() @ factor_energy._energy_lambda.squeeze()
-        factor_energy._z = x.double()
+        if env_index is None:
+            factor_energy._energy_eta = (factor_energy._energy_lambda @ x.double().unsqueeze(-1)).reshape(x.shape)
+            factor_energy._z = x.double()
+        else:
+            factor_energy._energy_eta[env_index] = factor_energy._energy_lambda[env_index] @ x.double()
+            factor_energy._z[env_index] = x.double()
 
 
     def iterate_gbp(self, num_iters=1, msg_pass_per_iter=1):
         self.current_means, self.current_covars = self.gbp.solve(num_iters=num_iters, msg_pass_per_iter=msg_pass_per_iter)
+        # Note: probably not required..
         self.vars = torch.diagonal(self.current_covars, dim1=-2, dim2=-1)
         self.stds = torch.sqrt(self.vars)
-        # Note: position estimates are just sampled from the current node mean aod covars.. not very reliable??
-        self.position_estimates = torch.normal(self.current_means, self.stds)
