@@ -103,55 +103,67 @@ class DOTSGBPAgent(DOTSAgent):
     def update_own_position_estimate(self):
         if self.action.u is not None:
             if torch.count_nonzero(self.action.u) > 0:
-                self.gbp.update_anchor(x=self.state.pos, anchor_index=0)
+                self.gbp.update_anchor(x=self.state.pos, anchor_index=self.agent_index)
 
 
     def estimate_goal_pos_from_sensors(self):
         if self.gbp.current_means is not None:
             distances, entities = self.sensors[1].measure()
             for i in range(self.n_goals):
-                dists = distances[entities == i + 1]
+                entity_mask = i+1
+                dists = distances[entities == entity_mask]
                 if dists.numel() > 0:
-                    ent_indices = torch.nonzero(entities == i + 1).squeeze()
-                    if len(ent_indices.shape) == 1:
-                        ent_indices = ent_indices.unsqueeze(0)
-                    for j, e in enumerate(ent_indices):
-                        anchor_index = self.n_agents + i
-                        env_index = e[0]
-                        own_pos_est = self.gbp.current_means[env_index, 0]
-                        new_pos_est = torch.stack(
-                            [
-                                own_pos_est[0] + dists[j] * torch.cos(self.sensors[1]._angles[env_index][e[1]]),
-                                own_pos_est[1] + dists[j] * torch.sin(self.sensors[1]._angles[env_index][e[1]])
-                            ],
-                            dim=-1
-                        ).to(self.device)
-                        self.gbp.update_anchor(x=new_pos_est, anchor_index=anchor_index, env_index=env_index)
-
+                    # Get all pairs of [batch_dim, ray_index] for any collisions with the goal.
+                    detections = torch.nonzero(entities == entity_mask).squeeze()
+                    self.update_entity_anchor(detections=detections,
+                                              dists=dists,
+                                              anchor_index=self.gbp.graph_dict['goals']['nodes'][i])
 
     def estimate_other_agent_pos_from_sensors(self):
         if self.gbp.current_means is not None:
+            # NOTE: We need to be concious of the return structure of `entities`:
+            #   '0' represents no entity detection.
+            #   i > 0 represents the ith entity checked when computing ray collisions
+            #   therefore if we are checking for agent 1:
+            #       '1' = agent 0, '2' = agent 2, '3' = agent 3 etc.
+            #       In general: entries are indexed i + 1 if i < self.agent_index else i
             distances, entities = self.sensors[0].measure()
-            for i in range(self.n_agents):
+            # Go through all agents != self
+            for i in self.gbp.graph_dict['agents']['nodes']:
+            # for i in range(self.n_agents):
                 if i != self.agent_index:
-                    other_ent_index = i + 1 if i < self.agent_index else i
-                    dists = distances[entities == other_ent_index]
+                    # Adjust agent index according to notes above
+                    entity_mask = i + 1 if i < self.agent_index else i
+                    # Find all distances related to the other agent index
+                    dists = distances[entities == entity_mask]
                     if dists.numel() > 0:
-                        ent_indices = torch.nonzero(entities == other_ent_index).squeeze()
-                        if len(ent_indices.shape) == 1:
-                            ent_indices = ent_indices.unsqueeze(0)
-                        for j, e in enumerate(ent_indices):
-                            anchor_index = (self.agent_index + i) % self.n_agents
-                            env_index = e[0]
-                            own_pos_est = self.gbp.current_means[env_index, 0]
-                            new_pos_est = torch.stack(
-                                [
-                                    own_pos_est[0] + dists[j] * torch.cos(self.sensors[0]._angles[env_index][e[1]]),
-                                    own_pos_est[1] + dists[j] * torch.sin(self.sensors[0]._angles[env_index][e[1]])
-                                ],
-                                dim=-1
-                            ).to(self.device)
-                            self.gbp.update_anchor(x=new_pos_est, anchor_index=anchor_index, env_index=env_index)
+                        # Get all pairs of [batch_dim, ray_index] for any collisions with the other agent.
+                        detections = torch.nonzero(entities == entity_mask).squeeze()
+                        self.update_entity_anchor(detections=detections,
+                                                  dists=dists,
+                                                  anchor_index=i)
+
+    def update_entity_anchor(self, detections, dists, anchor_index):
+        if len(detections.shape) == 1:
+            detections = detections.unsqueeze(0)
+        # NOTE: Not optimised for tensors.. rethink when there's some time to look at it.
+        # Find the minimum sensor distance to the other agent in each detected batch dimension.
+        batch_dims = detections[:, 0]
+        for env_index in batch_dims.unique():
+            batch_mask = (batch_dims == env_index)
+            batch_dists = dists[batch_mask]
+            min_dist, min_index = batch_dists.min(dim=0)
+            ray_index = detections[batch_mask][min_index].squeeze()[-1]
+            # Using current estimate of own position, estimate the position of the other agent
+            own_pos_est = self.gbp.current_means[env_index, self.agent_index]
+            new_pos_est = torch.stack(
+                [
+                    own_pos_est[0] + min_dist * torch.cos(self.sensors[1]._angles[env_index][ray_index]),
+                    own_pos_est[1] + min_dist * torch.sin(self.sensors[1]._angles[env_index][ray_index])
+                ],
+                dim=-1
+            ).to(self.device)
+            self.gbp.update_anchor(x=new_pos_est, anchor_index=anchor_index, env_index=env_index)
 
     def render(self, env_index: int = 0, selected_agents: List[int] = None) -> "List[Geom]":
         geoms = super().render(env_index)

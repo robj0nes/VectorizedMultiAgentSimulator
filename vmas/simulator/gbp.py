@@ -36,6 +36,7 @@ class GaussianBeliefPropogation():
         self.graph_dict = graph_dict
         self.msg_passing_iters = msg_passing_iters
         self.msgs_per_iter = msgs_per_iter
+        # TODO: Store lists of node indices for agents, goals and otherwise.
 
         self.total_nodes = 0
         for k in self.graph_dict.keys():

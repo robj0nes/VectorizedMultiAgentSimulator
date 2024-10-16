@@ -91,15 +91,14 @@ class Scenario(BaseScenario):
             if self.use_gbp:
                 entity_filter_agents: Callable[[Entity], bool] = lambda e: isinstance(e, DOTSGBPAgent)
                 entity_filter_goals: Callable[[Entity], bool] = lambda e: isinstance(e, DOTSGBPGoal)
-                # We assume the 'self' is node 0
                 graph_dict = {
-                    'robots': {
-                        'nodes': [i for i in range(self.n_agents)],
-                        'edges': [[0, i] for i in range(1, self.n_agents)]
+                    'agents': {
+                        'nodes': [j for j in range(self.n_agents)],
+                        'edges': [[i, j] for j in range(self.n_agents) if i != j]
                     },
                     'goals': {
-                        'nodes': [i for i in range(self.n_agents, self.n_agents * 2)],
-                        'edges': [[0, i] for i in range(self.n_agents, self.n_agents * 2)]
+                        'nodes': [j for j in range(self.n_agents, self.n_agents * 2)],
+                        'edges': [[i, j] for j in range(self.n_agents, self.n_agents * 2)]
                     }
                 }
 
@@ -218,7 +217,7 @@ class Scenario(BaseScenario):
         for i, agent in enumerate(self.world.agents):
             if self.use_gbp:
                 # Update our robot position anchor with the starting position.
-                agent.gbp.update_anchor(agent.state.pos, anchor_index=0)
+                agent.gbp.update_anchor(agent.state.pos, anchor_index=i)
 
             if self.split_goals:
                 goal_index = int(i // self.agents_with_same_goal)
