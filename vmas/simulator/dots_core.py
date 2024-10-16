@@ -152,7 +152,7 @@ class DOTSGBPAgent(DOTSAgent):
         for env_index in batch_dims.unique():
             batch_mask = (batch_dims == env_index)
             batch_dists = dists[batch_mask]
-            min_dist, min_index = batch_dists.min(dim=0)
+            min_dist, min_index = torch.abs(batch_dists).min(dim=0)
             ray_index = detections[batch_mask][min_index].squeeze()[-1]
             # Using current estimate of own position, estimate the position of the other agent
             own_pos_est = self.gbp.current_means[env_index, self.agent_index]
@@ -165,8 +165,11 @@ class DOTSGBPAgent(DOTSAgent):
             ).to(self.device)
             self.gbp.update_anchor(x=new_pos_est, anchor_index=anchor_index, env_index=env_index)
 
-    def render(self, env_index: int = 0, selected_agents: List[int] = None) -> "List[Geom]":
+    def render(self, env_index: int = 0, selected_agents: List[int] = None, show_gaussians: bool = True) -> "List[Geom]":
         geoms = super().render(env_index)
+        if not show_gaussians:
+            return geoms
+
         # Selected agents is not None if we are rendering interactively. Otherwise we render agent 0 by default.
         if (selected_agents is not None and self.agent_index in selected_agents
                 or selected_agents is None and '0' in self.name):
@@ -175,27 +178,31 @@ class DOTSGBPAgent(DOTSAgent):
                          for mu, sigma in zip(self.gbp.current_means[env_index], self.gbp.current_covars[env_index])]
 
             for i, g in enumerate(gaussians):
-                # Each agent assigns itself variable 0 in the graph, therefore all other agents are
-                agent_index = (i + self.agent_index) % self.n_agents
+                # Note: Assuming n_agents == n_goals
+                entity_index = i % self.n_agents
 
                 # Eval gaussian grid-wise in worldspace and collect any pdf(x) > 2
+                np.set_printoptions(legacy='1.25')
                 X, Y, Z = g.eval_grid([-self.world.arena_size, self.world.arena_size,
                                        -self.world.arena_size, self.world.arena_size],
                                       n_samples=200)
-                locs = np.where(Z > 2)
-
+                ys, xs = np.where(Z > 0.5)
                 # Extract the world coordinates at each evaulation point. TODO: More thorough testing that this is correct.
-                marker_pos = [(Y[locs[1][i]][0], X[0][locs[0][i]], Z[locs[0][i]][locs[1][i]]) for i in range(len(locs[0]))]
+                marker_pos = [(X[0][xs[i]], Y[ys[i]][0], Z[ys[i]][xs[i]]) for i in range(len(xs))]
 
+                # mean_loc = np.where(Z == np.max(Z))
+                # mean_pos = (X[0][mean_loc[1][0]], Y[mean_loc[0][0]][0], Z[mean_loc[0][0]][mean_loc[1][0]])
                 if len(marker_pos) > 0:
                     # Normalise the z values for better rendering.
                     zs = [m[2] for m in marker_pos]
                     min_zs = np.min(zs)
                     max_zs = np.max(zs)
                     norm_markers = [(mp[0], mp[1], (mp[2] - min_zs) / (max_zs - min_zs)) for mp in marker_pos]
+
+                    # norm_markers = marker_pos
                     for m in norm_markers:
                         marker = rendering.make_circle(radius=0.01, filled=True)
-                        marker.set_color(*self.world.agents[agent_index].color, alpha=m[2] - 0.25)
+                        marker.set_color(*self.world.agents[entity_index].color, alpha=m[2] - 0.5)
                         marker_xform = rendering.Transform()
                         marker_xform.set_translation(m[0], m[1])
                         marker.add_attr(marker_xform)

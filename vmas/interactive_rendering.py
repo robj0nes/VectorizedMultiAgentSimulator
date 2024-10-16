@@ -76,6 +76,7 @@ class InteractiveEnv:
 
         self.text_lines = []
         self.font_size = 15
+        self.show_gaussians = False  # Passed down render chain to allow for toggling on/off
         self.env.render()
         self.text_idx = len(self.env.unwrapped().text_lines)
         self._init_text()
@@ -156,6 +157,7 @@ class InteractiveEnv:
                 visualize_when_rgb=True,
                 selected_agents=[self.current_agent_index] if not self.control_two_agents
                 else [self.current_agent_index, self.current_agent_index2],
+                show_gaussians=self.show_gaussians,
             )
             if self.save_render:
                 self.frame_list.append(frame)
@@ -182,6 +184,8 @@ class InteractiveEnv:
 
         agent_range = self.agents[self.current_agent_index].action.u_range_tensor
         try:
+
+
             if k == key.LEFT:
                 self.keys[0] = agent_range[0]
             elif k == key.RIGHT:
@@ -203,6 +207,9 @@ class InteractiveEnv:
                         self.current_agent_index = self._increment_selected_agent_index(
                             self.current_agent_index
                         )
+            elif k == key.G:
+                self.show_gaussians = not self.show_gaussians
+
 
             elif k == key._0:
                 self.c[self.current_agent_index][0] += 0.1
