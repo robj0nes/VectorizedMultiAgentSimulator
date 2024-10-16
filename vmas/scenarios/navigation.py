@@ -9,7 +9,7 @@ from torch import Tensor
 
 from vmas import render_interactively
 from vmas.simulator.gbp import GaussianBeliefPropogation
-from vmas.simulator.core import Agent, Entity, Landmark, Sphere, World
+from vmas.simulator.core import Agent, Entity, Landmark, Sphere, World, Box
 from vmas.simulator.dots_core import DOTSGBPWorld, DOTSGBPAgent, DOTSGBPGoal
 from vmas.simulator.heuristic_policy import BaseHeuristicPolicy
 from vmas.simulator.scenario import BaseScenario
@@ -97,13 +97,17 @@ class Scenario(BaseScenario):
                         'nodes': [i for i in range(self.n_agents)],
                         'edges': [[0, i] for i in range(1, self.n_agents)]
                     },
-                    # 'goals': {
-                    #     'nodes': [4, 5, 6, 7],
-                    #     'edges': [[0, 4], [0, 5], [0, 6], [0, 7]]
-                    # }
+                    'goals': {
+                        'nodes': [i for i in range(self.n_agents, self.n_agents * 2)],
+                        'edges': [[0, i] for i in range(self.n_agents, self.n_agents * 2)]
+                    }
                 }
 
-                gbp = GaussianBeliefPropogation(graph_dict=graph_dict, batch_dim=batch_dim, device=device)
+                gbp = GaussianBeliefPropogation(graph_dict=graph_dict,
+                                                msg_passing_iters=1,
+                                                msgs_per_iter=1,
+                                                batch_dim=batch_dim,
+                                                device=device)
                 # Note: For now assumes n_agents == n_goals
                 agent = DOTSGBPAgent(
                     name=f"agent_{i}",
@@ -119,16 +123,12 @@ class Scenario(BaseScenario):
                         [
                             ObjectDectionCamera(
                                 world,
-                                angle_start=0,
-                                angle_end=2 * torch.pi,
                                 n_rays=16,
                                 max_range=self.lidar_range,
                                 entity_filter=entity_filter_agents,
                             ),
                             ObjectDectionCamera(
                                 world,
-                                angle_start=0,
-                                angle_end=2 * torch.pi,
                                 n_rays=16,
                                 max_range=self.lidar_range,
                                 entity_filter=entity_filter_goals,
@@ -166,11 +166,18 @@ class Scenario(BaseScenario):
             world.add_agent(agent)
 
             # Add goals
-            goal = Landmark(
-                name=f"goal {i}",
-                collide=False,
-                color=color,
-            )
+            if self.use_gbp:
+                goal = DOTSGBPGoal(
+                    name=f"goal {i}",
+                    collide=False,
+                    color=color
+                )
+            else:
+                goal = Landmark(
+                    name=f"goal {i}",
+                    collide=False,
+                    color=color,
+                )
             world.add_landmark(goal)
             agent.goal = goal
 
@@ -460,7 +467,7 @@ class HeuristicPolicy(BaseHeuristicPolicy):
 if __name__ == "__main__":
     render_interactively(
         __file__,
-        control_two_agents=True,
+        control_two_agents=False,
         use_gbp=True,
         lidar_range=0.2
     )

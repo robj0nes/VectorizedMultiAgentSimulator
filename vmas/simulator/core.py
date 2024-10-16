@@ -765,7 +765,7 @@ class Entity(TorchVectorizedObject, Observable, ABC):
         super().to(device)
         self.state.to(device)
 
-    def render(self, env_index: int = 0) -> "List[Geom]":
+    def render(self, env_index: int = 0, **kwargs) -> "List[Geom]":
         from vmas.simulator import rendering
 
         if not self.is_rendering[env_index]:

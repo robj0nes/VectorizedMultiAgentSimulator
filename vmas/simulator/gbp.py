@@ -5,6 +5,8 @@ from torch_bp.graph.factors import UnaryFactor, PairwiseFactor
 from torch_bp.graph.factors.linear_gaussian_factors import NaryGaussianLinearFactor, UnaryGaussianLinearFactor, \
     PairwiseGaussianLinearFactor
 
+# TODO: Refactor so that the agent anchor factors correspond to the name index.
+
 class GaussianBeliefPropogation():
     '''
     Takes a `graph_dict` which defines the nodes groups and relationships within the graph.
@@ -21,12 +23,19 @@ class GaussianBeliefPropogation():
                 }
     '''
     
-    def __init__(self, graph_dict: dict, batch_dim: int, device: torch.device, dtype: torch.dtype=torch.float64):
+    def __init__(self,
+                 graph_dict: dict,
+                 batch_dim: int,
+                 device: torch.device,
+                 msg_passing_iters: int = 1,
+                 msgs_per_iter: int = 1,
+                 dtype: torch.dtype=torch.float64):
         self.batch_dim = batch_dim
         self.device = device
         self.dtype = dtype
         self.graph_dict = graph_dict
-
+        self.msg_passing_iters = msg_passing_iters
+        self.msgs_per_iter = msgs_per_iter
 
         self.total_nodes = 0
         for k in self.graph_dict.keys():
@@ -127,8 +136,9 @@ class GaussianBeliefPropogation():
             factor_energy._z[env_index] = x.double()
 
 
-    def iterate_gbp(self, num_iters=1, msg_pass_per_iter=1):
-        self.current_means, self.current_covars = self.gbp.solve(num_iters=num_iters, msg_pass_per_iter=msg_pass_per_iter)
+    def iterate_gbp(self):
+        self.current_means, self.current_covars = self.gbp.solve(num_iters=self.msg_passing_iters,
+                                                                 msg_pass_per_iter=self.msgs_per_iter)
         # Note: probably not required..
         self.vars = torch.diagonal(self.current_covars, dim1=-2, dim2=-1)
         self.stds = torch.sqrt(self.vars)

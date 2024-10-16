@@ -154,6 +154,8 @@ class InteractiveEnv:
             frame = self.env.render(
                 mode="rgb_array" if self.save_render else "human",
                 visualize_when_rgb=True,
+                selected_agents=[self.current_agent_index] if not self.control_two_agents
+                else [self.current_agent_index, self.current_agent_index2],
             )
             if self.save_render:
                 self.frame_list.append(frame)

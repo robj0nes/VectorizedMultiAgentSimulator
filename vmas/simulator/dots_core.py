@@ -106,7 +106,30 @@ class DOTSGBPAgent(DOTSAgent):
                 self.gbp.update_anchor(x=self.state.pos, anchor_index=0)
 
 
-    def estimate_other_agent_pos_from_lidar(self):
+    def estimate_goal_pos_from_sensors(self):
+        if self.gbp.current_means is not None:
+            distances, entities = self.sensors[1].measure()
+            for i in range(self.n_goals):
+                dists = distances[entities == i + 1]
+                if dists.numel() > 0:
+                    ent_indices = torch.nonzero(entities == i + 1).squeeze()
+                    if len(ent_indices.shape) == 1:
+                        ent_indices = ent_indices.unsqueeze(0)
+                    for j, e in enumerate(ent_indices):
+                        anchor_index = self.n_agents + i
+                        env_index = e[0]
+                        own_pos_est = self.gbp.current_means[env_index, 0]
+                        new_pos_est = torch.stack(
+                            [
+                                own_pos_est[0] + dists[j] * torch.cos(self.sensors[1]._angles[env_index][e[1]]),
+                                own_pos_est[1] + dists[j] * torch.sin(self.sensors[1]._angles[env_index][e[1]])
+                            ],
+                            dim=-1
+                        ).to(self.device)
+                        self.gbp.update_anchor(x=new_pos_est, anchor_index=anchor_index, env_index=env_index)
+
+
+    def estimate_other_agent_pos_from_sensors(self):
         if self.gbp.current_means is not None:
             distances, entities = self.sensors[0].measure()
             for i in range(self.n_agents):
@@ -115,7 +138,6 @@ class DOTSGBPAgent(DOTSAgent):
                     dists = distances[entities == other_ent_index]
                     if dists.numel() > 0:
                         ent_indices = torch.nonzero(entities == other_ent_index).squeeze()
-                        test = len(ent_indices.shape)
                         if len(ent_indices.shape) == 1:
                             ent_indices = ent_indices.unsqueeze(0)
                         for j, e in enumerate(ent_indices):
@@ -131,25 +153,36 @@ class DOTSGBPAgent(DOTSAgent):
                             ).to(self.device)
                             self.gbp.update_anchor(x=new_pos_est, anchor_index=anchor_index, env_index=env_index)
 
-    def render(self, env_index: int = 0) -> "List[Geom]":
+    def render(self, env_index: int = 0, selected_agents: List[int] = None) -> "List[Geom]":
         geoms = super().render(env_index)
-        if '0' in self.name:
-            # for means, covars in zip(self.means[env_index], self.covars[env_index]):
+        # Selected agents is not None if we are rendering interactively. Otherwise we render agent 0 by default.
+        if (selected_agents is not None and self.agent_index in selected_agents
+                or selected_agents is None and '0' in self.name):
+            # Create Gaussian distributions from all variables.
             gaussians = [dist.Gaussian(mu, sigma, device=self.device)
                          for mu, sigma in zip(self.gbp.current_means[env_index], self.gbp.current_covars[env_index])]
+
             for i, g in enumerate(gaussians):
+                # Each agent assigns itself variable 0 in the graph, therefore all other agents are
                 agent_index = (i + self.agent_index) % self.n_agents
-                # eval gaussian in worldspace TODO: Get arena dims.
-                X, Y, Z = g.eval_grid([-2, 2, -2, 2], n_samples=200)
-                locs = np.where(Z > 0.5)
+
+                # Eval gaussian grid-wise in worldspace and collect any pdf(x) > 2
+                X, Y, Z = g.eval_grid([-self.world.arena_size, self.world.arena_size,
+                                       -self.world.arena_size, self.world.arena_size],
+                                      n_samples=200)
+                locs = np.where(Z > 2)
+
+                # Extract the world coordinates at each evaulation point. TODO: More thorough testing that this is correct.
                 marker_pos = [(Y[locs[1][i]][0], X[0][locs[0][i]], Z[locs[0][i]][locs[1][i]]) for i in range(len(locs[0]))]
+
                 if len(marker_pos) > 0:
+                    # Normalise the z values for better rendering.
                     zs = [m[2] for m in marker_pos]
                     min_zs = np.min(zs)
                     max_zs = np.max(zs)
                     norm_markers = [(mp[0], mp[1], (mp[2] - min_zs) / (max_zs - min_zs)) for mp in marker_pos]
                     for m in norm_markers:
-                        marker = rendering.make_circle(radius=0.005, filled=True)
+                        marker = rendering.make_circle(radius=0.01, filled=True)
                         marker.set_color(*self.world.agents[agent_index].color, alpha=m[2] - 0.25)
                         marker_xform = rendering.Transform()
                         marker_xform.set_translation(m[0], m[1])
@@ -164,11 +197,9 @@ class DOTSGBPWorld(DOTSWorld):
 
     def update_and_iterate_gbp(self, agent: DOTSGBPAgent):
         agent.update_own_position_estimate()
-        agent.estimate_other_agent_pos_from_lidar()
-        # TODO: Update GBP nodes according to detected agent position estimates..
-        #  Need to work out how to identify which agent we've detected..!
-
-        agent.gbp.iterate_gbp(num_iters=1, msg_pass_per_iter=1)
+        agent.estimate_other_agent_pos_from_sensors()
+        agent.estimate_goal_pos_from_sensors()
+        agent.gbp.iterate_gbp()
 
 # Currently used to distinguish goal landmarks with Lidar filters.
 class DOTSGBPGoal(Landmark):

@@ -619,6 +619,7 @@ class Environment(TorchVectorizedObject):
         plot_position_function_cmap_range: Optional[Tuple[float, float]] = None,
         plot_position_function_cmap_alpha: Optional[float] = 1.0,
         plot_position_function_cmap_name: Optional[str] = "viridis",
+        **kwargs
     ):
         """
         Render function for environment using pyglet
@@ -774,7 +775,7 @@ class Environment(TorchVectorizedObject):
         self.viewer.add_onetime_list(self.scenario.extra_render(env_index))
 
         for entity in self.world.entities:
-            self.viewer.add_onetime_list(entity.render(env_index=env_index))
+            self.viewer.add_onetime_list(entity.render(env_index=env_index, **kwargs))
 
         # # Add list of geoms to render on top of all world entities.
         # self.viewer.add_onetime_list(self.scenario.top_layer_render(env_index))
