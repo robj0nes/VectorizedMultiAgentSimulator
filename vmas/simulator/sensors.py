@@ -163,11 +163,19 @@ class Lidar(Sensor):
         return geoms
 
 
-class ObjectDectionCamera(Lidar):
+class ObjectDetectionCamera(Lidar):
+    """
+    Extension of Lidar which returns an entity index for the ray intersection.
+    Note: For now, this is a bit janky..
+        - The entity is indexed by the progress of the ray-casting loop across all entities this sensor collides with
+        - Note, Index is + 1, as 0 represents no hit.
+    TODO: Improve return to provide some explicit identification for the entity.
+    """
     def __init__(self,
                  world: vmas.simulator.core.World,
                  **kwargs):
         super().__init__(world, **kwargs)
+        self._last_entities=None
 
     def measure(self, vectorized: bool = True):
         if not vectorized:

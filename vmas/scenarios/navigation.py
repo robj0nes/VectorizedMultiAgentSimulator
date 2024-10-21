@@ -13,7 +13,7 @@ from vmas.simulator.core import Agent, Entity, Landmark, Sphere, World, Box
 from vmas.simulator.dots_core import DOTSGBPWorld, DOTSGBPAgent, DOTSGBPGoal
 from vmas.simulator.heuristic_policy import BaseHeuristicPolicy
 from vmas.simulator.scenario import BaseScenario
-from vmas.simulator.sensors import Lidar, ObjectDectionCamera
+from vmas.simulator.sensors import Lidar, ObjectDetectionCamera
 from vmas.simulator.utils import Color, ScenarioUtils, X, Y
 
 if typing.TYPE_CHECKING:
@@ -120,13 +120,13 @@ class Scenario(BaseScenario):
                     n_goals=self.n_agents,
                     sensors=(
                         [
-                            ObjectDectionCamera(
+                            ObjectDetectionCamera(
                                 world,
                                 n_rays=16,
                                 max_range=self.lidar_range,
                                 entity_filter=entity_filter_agents,
                             ),
-                            ObjectDectionCamera(
+                            ObjectDetectionCamera(
                                 world,
                                 n_rays=16,
                                 max_range=self.lidar_range,
