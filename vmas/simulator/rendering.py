@@ -529,11 +529,18 @@ def make_circle(radius=10, res=30, filled=True, angle=2 * math.pi):
         radius_x=radius, radius_y=radius, res=res, filled=filled, angle=angle
     )
 
-def make_ellipse(radius_x=10, radius_y=5, res=30, filled=True, angle=2 * math.pi):
+def make_ellipse(radius_x=10, radius_y=5, res=30, filled=True, angle=2 * math.pi, rotation=None):
     points = []
     for i in range(res):
         ang = -angle / 2 + angle * i / res
-        points.append((math.cos(ang) * radius_x, math.sin(ang) * radius_y))
+        x = radius_x * math.cos(ang)
+        y = radius_y * math.sin(ang)
+
+        if rotation:
+            x = x * math.cos(rotation) - y * math.sin(rotation)
+            y = x * math.sin(rotation) + y * math.cos(rotation)
+
+        points.append((x, y))
     if angle % (2 * math.pi) != 0:
         points.append((0, 0))
     if filled:

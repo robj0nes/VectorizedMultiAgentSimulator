@@ -76,7 +76,9 @@ class InteractiveEnv:
 
         self.text_lines = []
         self.font_size = 15
+        # TODO: Create more generic way of toggling rendering elements.
         self.show_gaussians = False  # Passed down render chain to allow for toggling on/off
+        self.show_lidar = False      # Passed down render chain to allow for toggling on/off
         self.env.render()
         self.text_idx = len(self.env.unwrapped().text_lines)
         self._init_text()
@@ -158,6 +160,7 @@ class InteractiveEnv:
                 selected_agents=[self.current_agent_index] if not self.control_two_agents
                 else [self.current_agent_index, self.current_agent_index2],
                 show_gaussians=self.show_gaussians,
+                show_lidar=self.show_lidar,
             )
             if self.save_render:
                 self.frame_list.append(frame)
@@ -209,6 +212,8 @@ class InteractiveEnv:
                         )
             elif k == key.G:
                 self.show_gaussians = not self.show_gaussians
+            elif k == key.L:
+                self.show_lidar = not self.show_lidar
 
 
             elif k == key._0:

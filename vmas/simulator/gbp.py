@@ -1,9 +1,8 @@
 import torch
 from torch_bp.bp import LoopyLinearGaussianBP
 from torch_bp.graph import FactorGraph
-from torch_bp.graph.factors import UnaryFactor, PairwiseFactor
-from torch_bp.graph.factors.linear_gaussian_factors import NaryGaussianLinearFactor, UnaryGaussianLinearFactor, \
-    PairwiseGaussianLinearFactor
+from torch_bp.graph.factors.linear_gaussian_factors import UnaryGaussianLinearFactor, PairwiseGaussianLinearFactor
+
 
 # TODO: Refactor so that the agent anchor factors correspond to the name index.
 
@@ -22,14 +21,14 @@ class GaussianBeliefPropogation():
                     }
                 }
     '''
-    
+
     def __init__(self,
                  graph_dict: dict,
                  batch_dim: int,
                  device: torch.device,
                  msg_passing_iters: int = 1,
                  msgs_per_iter: int = 1,
-                 dtype: torch.dtype=torch.float64):
+                 dtype: torch.dtype = torch.float64):
         self.batch_dim = batch_dim
         self.device = device
         self.dtype = dtype
@@ -46,7 +45,7 @@ class GaussianBeliefPropogation():
 
         # Define initial mu and covariance for nodes.
         self.init_node_mu = ((torch.randn(self.batch_dim, self.total_nodes, 2) * 2 + 2)
-                             .to(device=self.device,  dtype=self.dtype))
+                             .to(device=self.device, dtype=self.dtype))
         self.init_node_covar = (2 * torch.eye(2, device=self.device, dtype=self.dtype)
                                 .repeat(self.batch_dim, self.total_nodes, 1, 1))
 
@@ -80,7 +79,8 @@ class GaussianBeliefPropogation():
                                factors=self.factors,
                                factor_neighbours=self.factor_neighbours)
 
-        return LoopyLinearGaussianBP(node_means=self.init_node_mu, node_covars=self.init_node_covar, factor_graph=fac_grap,
+        return LoopyLinearGaussianBP(node_means=self.init_node_mu, node_covars=self.init_node_covar,
+                                     factor_graph=fac_grap,
                                      tensor_kwargs={'device': self.device,
                                                     'dtype': torch.float64},
                                      batch_dim=self.batch_dim)
@@ -97,15 +97,15 @@ class GaussianBeliefPropogation():
         self.factor_neighbours = []
         # First we create anchor factors for all variables. Everything is initialised with zero means.
         anchor_factors = [UnaryGaussianLinearFactor(self.unary_anchor_fn,
-                                                    torch.zeros(self.batch_dim, 2, device=self.device, dtype=self.dtype),
+                                                    torch.zeros(self.batch_dim, 2, device=self.device,
+                                                                dtype=self.dtype),
                                                     self.sigma * torch.eye(2, device=self.device, dtype=torch.float64)
                                                     .unsqueeze(0).repeat(self.batch_dim, 1, 1),
-                                                    self.init_node_mu[:, 0].to(self.device),
+                                                    self.init_node_mu[:, i],
                                                     True)
                           for i in range(self.total_nodes)]
         self.factor_neighbours.extend([(i,) for i in range(self.total_nodes)])
         self.factors.extend(anchor_factors)
-
 
         for key in self.graph_dict.keys():
             dist_factors = [
@@ -115,7 +115,7 @@ class GaussianBeliefPropogation():
                     self.init_dist_covar,
                     torch.concat(
                         (self.init_node_mu[:, i],
-                        self.init_node_mu[:, j]),
+                         self.init_node_mu[:, j]),
                         dim=-1)
                     .to(self.device),
                     False
@@ -125,17 +125,8 @@ class GaussianBeliefPropogation():
             self.factor_neighbours.extend([(i, j) for edge in self.graph_dict[key]['edges'] for i, j in [edge]])
             self.factors.extend(dist_factors)
 
-
     def update_anchor(self, x: torch.Tensor, anchor_index: int, env_index=None):
-        factor = self.gbp.factor_graph.factor_clusters[anchor_index]
-        factor_energy = self.gbp.factor_graph.factor_clusters[anchor_index].factor.nary_factor.energy_fn
-        if env_index is None:
-            factor_energy._energy_eta = (factor_energy._energy_lambda @ x.double().unsqueeze(-1)).reshape(x.shape)
-            factor_energy._z = x.double()
-        else:
-            factor_energy._energy_eta[env_index] = factor_energy._energy_lambda[env_index] @ x.double()
-            factor_energy._z[env_index] = x.double()
-
+        self.gbp.factor_graph.factor_clusters[anchor_index].factor.update_bias(x, batch_dim=env_index)
 
     def iterate_gbp(self):
         self.current_means, self.current_covars = self.gbp.solve(num_iters=self.msg_passing_iters,

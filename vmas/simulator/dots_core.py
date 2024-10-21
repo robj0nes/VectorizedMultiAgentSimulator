@@ -99,18 +99,17 @@ class DOTSGBPAgent(DOTSAgent):
         self.n_agents = n_agents
         self.n_goals = n_goals
 
-    # TODO: Dont use self.state.pos - instead take our current position estimate and add the action vector
     def update_own_position_estimate(self):
+        # state.pos is derived from the simulator physics and serves as a suitable estimate of position.
         if self.action.u is not None:
             if torch.count_nonzero(self.action.u) > 0:
                 self.gbp.update_anchor(x=self.state.pos, anchor_index=self.agent_index)
-
 
     def estimate_goal_pos_from_sensors(self):
         if self.gbp.current_means is not None:
             distances, entities = self.sensors[1].measure()
             for i in range(self.n_goals):
-                entity_mask = i+1
+                entity_mask = i + 1
                 dists = distances[entities == entity_mask]
                 if dists.numel() > 0:
                     # Get all pairs of [batch_dim, ray_index] for any collisions with the goal.
@@ -121,7 +120,7 @@ class DOTSGBPAgent(DOTSAgent):
 
     def estimate_other_agent_pos_from_sensors(self):
         if self.gbp.current_means is not None:
-            # NOTE: We need to be concious of the return structure of `entities`:
+            # NOTE: We need to be conscious of the return structure of `entities`:
             #   '0' represents no entity detection.
             #   i > 0 represents the ith entity checked when computing ray collisions
             #   therefore if we are checking for agent 1:
@@ -130,7 +129,7 @@ class DOTSGBPAgent(DOTSAgent):
             distances, entities = self.sensors[0].measure()
             # Go through all agents != self
             for i in self.gbp.graph_dict['agents']['nodes']:
-            # for i in range(self.n_agents):
+                # for i in range(self.n_agents):
                 if i != self.agent_index:
                     # Adjust agent index according to notes above
                     entity_mask = i + 1 if i < self.agent_index else i
@@ -165,48 +164,87 @@ class DOTSGBPAgent(DOTSAgent):
             ).to(self.device)
             self.gbp.update_anchor(x=new_pos_est, anchor_index=anchor_index, env_index=env_index)
 
-    def render(self, env_index: int = 0, selected_agents: List[int] = None, show_gaussians: bool = True) -> "List[Geom]":
+    def render_gaussian_as_ellipse(self, env_index):
+        geoms = []
+        gaussians = [(mu, sigma) for mu, sigma in zip(self.gbp.current_means[env_index],
+                                                      self.gbp.current_covars[env_index])]
+        std_devs = [x * 0.2 for x in range(0, 10)]
+        for i, (mu, sigma) in enumerate(gaussians):
+            entity_index = i % self.n_agents
+
+            for j in std_devs:
+                # Eigenvalues and eigenvectors of the covariance matrix
+                eigenvalues, eigenvectors = torch.linalg.eigh(sigma)
+
+                # Radii are proportional to the square root of the eigenvalues (scaled by std_devs)
+                radii_x, radii_y = j * torch.sqrt(eigenvalues)
+                # semi_minor, semi_major = j * torch.sqrt(eigenvalues)
+
+                # Note: The last eigenvalue/eigenvector are the largest, get angle wrt. x-axis.
+                # minor_rot = torch.atan2(eigenvectors[0][1], eigenvectors[0][0])
+                # major_rot = torch.atan2(eigenvectors[1][1], eigenvectors[1][0])
+                rot_angle = torch.atan2(eigenvectors[-1][1], eigenvectors[-1][0])
+
+                ring = rendering.make_ellipse(radii_x, radii_y, filled=True)
+                # ring = rendering.make_ellipse(radii_x, radii_y, filled=True, rotation=rot_angle)
+                ring.set_color(*self.world.agents[entity_index].color, alpha=0.3 - j / 4)
+                ring_xform = rendering.Transform()
+                ring_xform.set_translation(mu[0], mu[1])
+                ring.add_attr(ring_xform)
+                geoms.append(ring)
+        return geoms
+
+    def render_gaussian_as_grid_sample(self, env_index):
+        geoms = []
+        gaussians = [dist.Gaussian(mu, sigma, device=self.device)
+                     for mu, sigma in zip(self.gbp.current_means[env_index], self.gbp.current_covars[env_index])]
+
+        for i, g in enumerate(gaussians):
+            # Note: Assuming n_agents == n_goals
+            entity_index = i % self.n_agents
+
+            # Eval gaussian grid-wise in worldspace and collect any pdf(x) > 2
+            np.set_printoptions(legacy='1.25')
+            X, Y, Z = g.eval_grid([-self.world.arena_size, self.world.arena_size,
+                                   -self.world.arena_size, self.world.arena_size],
+                                  n_samples=200)
+            ys, xs = np.where(Z > 0.5)
+            # Extract the world coordinates at each evaulation point. TODO: More thorough testing that this is correct.
+            marker_pos = [(X[0][xs[i]], Y[ys[i]][0], Z[ys[i]][xs[i]]) for i in range(len(xs))]
+
+            if len(marker_pos) > 0:
+                # Normalise the z values for better rendering.
+                zs = [m[2] for m in marker_pos]
+                min_zs = np.min(zs)
+                max_zs = np.max(zs)
+                norm_markers = [(mp[0], mp[1], (mp[2] - min_zs) / (max_zs - min_zs)) for mp in marker_pos]
+
+                # norm_markers = marker_pos
+                for m in norm_markers:
+                    marker = rendering.make_circle(radius=0.01, filled=True)
+                    marker.set_color(*self.world.agents[entity_index].color, alpha=m[2] - 0.5)
+                    marker_xform = rendering.Transform()
+                    marker_xform.set_translation(m[0], m[1])
+                    marker.add_attr(marker_xform)
+                    geoms.append(marker)
+        return geoms
+
+    def render(self, env_index: int = 0, selected_agents: List[int] = None,
+               show_gaussians: bool = False,
+               show_lidar: bool = False) -> "List[Geom]":
         geoms = super().render(env_index)
+        for s in self.sensors:
+            s._render = show_lidar
         if not show_gaussians:
             return geoms
 
-        # Selected agents is not None if we are rendering interactively. Otherwise we render agent 0 by default.
+        # Selected agents is not None if we are rendering interactively. Other-wise we render agent 0 by default.
         if (selected_agents is not None and self.agent_index in selected_agents
                 or selected_agents is None and '0' in self.name):
-            # Create Gaussian distributions from all variables.
-            gaussians = [dist.Gaussian(mu, sigma, device=self.device)
-                         for mu, sigma in zip(self.gbp.current_means[env_index], self.gbp.current_covars[env_index])]
-
-            for i, g in enumerate(gaussians):
-                # Note: Assuming n_agents == n_goals
-                entity_index = i % self.n_agents
-
-                # Eval gaussian grid-wise in worldspace and collect any pdf(x) > 2
-                np.set_printoptions(legacy='1.25')
-                X, Y, Z = g.eval_grid([-self.world.arena_size, self.world.arena_size,
-                                       -self.world.arena_size, self.world.arena_size],
-                                      n_samples=200)
-                ys, xs = np.where(Z > 0.5)
-                # Extract the world coordinates at each evaulation point. TODO: More thorough testing that this is correct.
-                marker_pos = [(X[0][xs[i]], Y[ys[i]][0], Z[ys[i]][xs[i]]) for i in range(len(xs))]
-
-                # mean_loc = np.where(Z == np.max(Z))
-                # mean_pos = (X[0][mean_loc[1][0]], Y[mean_loc[0][0]][0], Z[mean_loc[0][0]][mean_loc[1][0]])
-                if len(marker_pos) > 0:
-                    # Normalise the z values for better rendering.
-                    zs = [m[2] for m in marker_pos]
-                    min_zs = np.min(zs)
-                    max_zs = np.max(zs)
-                    norm_markers = [(mp[0], mp[1], (mp[2] - min_zs) / (max_zs - min_zs)) for mp in marker_pos]
-
-                    # norm_markers = marker_pos
-                    for m in norm_markers:
-                        marker = rendering.make_circle(radius=0.01, filled=True)
-                        marker.set_color(*self.world.agents[entity_index].color, alpha=m[2] - 0.5)
-                        marker_xform = rendering.Transform()
-                        marker_xform.set_translation(m[0], m[1])
-                        marker.add_attr(marker_xform)
-                        geoms.append(marker)
+            # TODO: Refactor gaussian rendering to GBP class.
+            geoms += self.render_gaussian_as_ellipse(env_index)
+            # ALT:
+            # geoms += self.render_gaussian_as_grid_sample(env_index)
         return geoms
 
 
@@ -220,9 +258,10 @@ class DOTSGBPWorld(DOTSWorld):
         agent.estimate_goal_pos_from_sensors()
         agent.gbp.iterate_gbp()
 
+
 # Currently used to distinguish goal landmarks with Lidar filters.
 class DOTSGBPGoal(Landmark):
-    def __init__(self,  **kwargs):
+    def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
 

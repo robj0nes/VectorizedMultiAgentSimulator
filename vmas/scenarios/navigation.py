@@ -13,7 +13,7 @@ from vmas.simulator.core import Agent, Entity, Landmark, Sphere, World, Box
 from vmas.simulator.dots_core import DOTSGBPWorld, DOTSGBPAgent, DOTSGBPGoal
 from vmas.simulator.heuristic_policy import BaseHeuristicPolicy
 from vmas.simulator.scenario import BaseScenario
-from vmas.simulator.sensors import ObjectDectionCamera
+from vmas.simulator.sensors import Lidar, ObjectDectionCamera
 from vmas.simulator.utils import Color, ScenarioUtils, X, Y
 
 if typing.TYPE_CHECKING:
@@ -217,7 +217,7 @@ class Scenario(BaseScenario):
         for i, agent in enumerate(self.world.agents):
             if self.use_gbp:
                 # Update our robot position anchor with the starting position.
-                agent.gbp.update_anchor(agent.state.pos, anchor_index=i)
+                agent.gbp.update_anchor(agent.state.pos, anchor_index=i, env_index=env_index)
 
             if self.split_goals:
                 goal_index = int(i // self.agents_with_same_goal)
@@ -276,6 +276,8 @@ class Scenario(BaseScenario):
         pos_reward = self.pos_rew if self.shared_rew else agent.pos_rew
         return pos_reward + self.final_rew + agent.agent_collision_rew
 
+
+    # Note: do we want to do pos-shaping in GBP verison?.. probably not!
     def agent_reward(self, agent: Agent):
         agent.distance_to_goal = torch.linalg.vector_norm(
             agent.state.pos - agent.goal.state.pos,
@@ -293,28 +295,53 @@ class Scenario(BaseScenario):
             # Process GBP msg passing before taking observations.
             self.world.update_and_iterate_gbp(agent)
             sensor_meaurements = agent.sensors[0]._max_range - agent.sensors[0].measure()[0]
+            goal_poses = []
+            own_pos_est = agent.gbp.current_means[:, agent.agent_index]
+            if self.observe_all_goals:
+                for i in agent.gbp.graph_dict['goals']['nodes']:
+                    goal_pos_est = agent.gbp.current_means[:, i]
+                    goal_poses.append((own_pos_est - goal_pos_est).float())
+            else:
+                # We assume the goal index is the same as the agent_index
+                goal_index =agent.gbp.graph_dict['goals']['nodes'][agent.agent_index]
+                goal_pos_est = agent.gbp.current_means[:, goal_index]
+                goal_poses.append((own_pos_est - goal_pos_est).float())
+            return torch.cat(
+                [
+                    own_pos_est.float(),
+                    agent.state.vel
+                ]
+                + goal_poses
+                + (
+                    [sensor_meaurements]
+                    if self.collisions
+                    else []
+                ),
+                dim=-1,
+            )
+
         else:
             sensor_meaurements = agent.sensors[0]._max_range - agent.sensors[0].measure()
 
-        goal_poses = []
-        if self.observe_all_goals:
-            for a in self.world.agents:
-                goal_poses.append(agent.state.pos - a.goal.state.pos)
-        else:
-            goal_poses.append(agent.state.pos - agent.goal.state.pos)
-        return torch.cat(
-            [
-                agent.state.pos,
-                agent.state.vel,
-            ]
-            + goal_poses
-            + (
-                [sensor_meaurements]
-                if self.collisions
-                else []
-            ),
-            dim=-1,
-        )
+            goal_poses = []
+            if self.observe_all_goals:
+                for a in self.world.agents:
+                    goal_poses.append(agent.state.pos - a.goal.state.pos)
+            else:
+                goal_poses.append(agent.state.pos - agent.goal.state.pos)
+            return torch.cat(
+                [
+                    agent.state.pos,
+                    agent.state.vel,
+                ]
+                + goal_poses
+                + (
+                    [sensor_meaurements]
+                    if self.collisions
+                    else []
+                ),
+                dim=-1,
+            )
 
     def done(self):
         return torch.stack(
