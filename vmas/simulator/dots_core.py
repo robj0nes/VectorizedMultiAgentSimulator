@@ -166,28 +166,19 @@ class DOTSGBPAgent(DOTSAgent):
 
     def render_gaussian_as_ellipse(self, env_index):
         geoms = []
-        gaussians = [(mu, sigma) for mu, sigma in zip(self.gbp.current_means[env_index],
-                                                      self.gbp.current_covars[env_index])]
-        std_devs = [x * 0.2 for x in range(0, 10)]
-        for i, (mu, sigma) in enumerate(gaussians):
+        gauss_ellipses = self.gbp.get_gaussian_ellipses(env_index)
+        for i in range(len(gauss_ellipses)):
             entity_index = i % self.n_agents
+            for j, ellipse in enumerate(gauss_ellipses[i]):
+                mu = ellipse['mean']
+                radius = ellipse['radius']
 
-            for j in std_devs:
-                # Eigenvalues and eigenvectors of the covariance matrix
-                eigenvalues, eigenvectors = torch.linalg.eigh(sigma)
-
-                # Radii are proportional to the square root of the eigenvalues (scaled by std_devs)
-                radii_x, radii_y = j * torch.sqrt(eigenvalues)
-                # semi_minor, semi_major = j * torch.sqrt(eigenvalues)
-
-                # Note: The last eigenvalue/eigenvector are the largest, get angle wrt. x-axis.
-                # minor_rot = torch.atan2(eigenvectors[0][1], eigenvectors[0][0])
-                # major_rot = torch.atan2(eigenvectors[1][1], eigenvectors[1][0])
-                rot_angle = torch.atan2(eigenvectors[-1][1], eigenvectors[-1][0])
-
-                ring = rendering.make_ellipse(radii_x, radii_y, filled=True)
+                # TODO: Consider if we want to use this or not..?
+                rotation = ellipse['rot_angle']
                 # ring = rendering.make_ellipse(radii_x, radii_y, filled=True, rotation=rot_angle)
-                ring.set_color(*self.world.agents[entity_index].color, alpha=0.3 - j / 4)
+
+                ring = rendering.make_ellipse(radius[0], radius[1], filled=True)
+                ring.set_color(*self.world.agents[entity_index].color, alpha=0.3 - j * 0.05)
                 ring_xform = rendering.Transform()
                 ring_xform.set_translation(mu[0], mu[1])
                 ring.add_attr(ring_xform)
@@ -196,38 +187,18 @@ class DOTSGBPAgent(DOTSAgent):
 
     def render_gaussian_as_grid_sample(self, env_index):
         geoms = []
-        gaussians = [dist.Gaussian(mu, sigma, device=self.device)
-                     for mu, sigma in zip(self.gbp.current_means[env_index], self.gbp.current_covars[env_index])]
-
-        for i, g in enumerate(gaussians):
-            # Note: Assuming n_agents == n_goals
+        gauss_grid_sample = self.gbp.get_gaussian_grid_sample(env_index, sample_size=self.world.arena_size)
+        for i in range(len(gauss_grid_sample)):
             entity_index = i % self.n_agents
-
-            # Eval gaussian grid-wise in worldspace and collect any pdf(x) > 2
-            np.set_printoptions(legacy='1.25')
-            X, Y, Z = g.eval_grid([-self.world.arena_size, self.world.arena_size,
-                                   -self.world.arena_size, self.world.arena_size],
-                                  n_samples=200)
-            ys, xs = np.where(Z > 0.5)
-            # Extract the world coordinates at each evaulation point. TODO: More thorough testing that this is correct.
-            marker_pos = [(X[0][xs[i]], Y[ys[i]][0], Z[ys[i]][xs[i]]) for i in range(len(xs))]
-
-            if len(marker_pos) > 0:
-                # Normalise the z values for better rendering.
-                zs = [m[2] for m in marker_pos]
-                min_zs = np.min(zs)
-                max_zs = np.max(zs)
-                norm_markers = [(mp[0], mp[1], (mp[2] - min_zs) / (max_zs - min_zs)) for mp in marker_pos]
-
-                # norm_markers = marker_pos
-                for m in norm_markers:
-                    marker = rendering.make_circle(radius=0.01, filled=True)
-                    marker.set_color(*self.world.agents[entity_index].color, alpha=m[2] - 0.5)
-                    marker_xform = rendering.Transform()
-                    marker_xform.set_translation(m[0], m[1])
-                    marker.add_attr(marker_xform)
-                    geoms.append(marker)
+            for m in gauss_grid_sample[i]:
+                marker = rendering.make_circle(radius=0.01, filled=True)
+                marker.set_color(*self.world.agents[entity_index].color, alpha=m[2] - 0.5)
+                marker_xform = rendering.Transform()
+                marker_xform.set_translation(m[0], m[1])
+                marker.add_attr(marker_xform)
+                geoms.append(marker)
         return geoms
+
 
     def render(self, env_index: int = 0, selected_agents: List[int] = None,
                show_gaussians: bool = False,
@@ -241,7 +212,6 @@ class DOTSGBPAgent(DOTSAgent):
         # Selected agents is not None if we are rendering interactively. Other-wise we render agent 0 by default.
         if (selected_agents is not None and self.agent_index in selected_agents
                 or selected_agents is None and '0' in self.name):
-            # TODO: Refactor gaussian rendering to GBP class.
             geoms += self.render_gaussian_as_ellipse(env_index)
             # ALT:
             # geoms += self.render_gaussian_as_grid_sample(env_index)

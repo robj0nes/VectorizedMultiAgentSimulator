@@ -8,7 +8,7 @@ import torch
 from torch import Tensor
 
 from vmas import render_interactively
-from vmas.simulator.gbp import GaussianBeliefPropogation
+from vmas.simulator.gbp import GaussianBeliefPropagation
 from vmas.simulator.core import Agent, Entity, Landmark, Sphere, World, Box
 from vmas.simulator.dots_core import DOTSGBPWorld, DOTSGBPAgent, DOTSGBPGoal
 from vmas.simulator.heuristic_policy import BaseHeuristicPolicy
@@ -102,7 +102,7 @@ class Scenario(BaseScenario):
                     }
                 }
 
-                gbp = GaussianBeliefPropogation(graph_dict=graph_dict,
+                gbp = GaussianBeliefPropagation(graph_dict=graph_dict,
                                                 msg_passing_iters=1,
                                                 msgs_per_iter=1,
                                                 batch_dim=batch_dim,

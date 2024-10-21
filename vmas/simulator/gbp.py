@@ -1,12 +1,12 @@
+import numpy as np
 import torch
+import torch_bp.distributions as dist
 from torch_bp.bp import LoopyLinearGaussianBP
 from torch_bp.graph import FactorGraph
 from torch_bp.graph.factors.linear_gaussian_factors import UnaryGaussianLinearFactor, PairwiseGaussianLinearFactor
 
 
-# TODO: Refactor so that the agent anchor factors correspond to the name index.
-
-class GaussianBeliefPropogation():
+class GaussianBeliefPropagation():
     '''
     Takes a `graph_dict` which defines the nodes groups and relationships within the graph.
     Example where we assume node[0] is the robot hosting the graph:
@@ -35,7 +35,6 @@ class GaussianBeliefPropogation():
         self.graph_dict = graph_dict
         self.msg_passing_iters = msg_passing_iters
         self.msgs_per_iter = msgs_per_iter
-        # TODO: Store lists of node indices for agents, goals and otherwise.
 
         self.total_nodes = 0
         for k in self.graph_dict.keys():
@@ -95,7 +94,7 @@ class GaussianBeliefPropogation():
         #       but must be introduced across all batched envs (batch_dim)
         self.factors = []
         self.factor_neighbours = []
-        # First we create anchor factors for all variables. Everything is initialised with zero means.
+        # First we create anchor factors for all variables. Everything is initialised with zero bias. x_0 is random.
         anchor_factors = [UnaryGaussianLinearFactor(self.unary_anchor_fn,
                                                     torch.zeros(self.batch_dim, 2, device=self.device,
                                                                 dtype=self.dtype),
@@ -134,3 +133,57 @@ class GaussianBeliefPropogation():
         # Note: probably not required..
         self.vars = torch.diagonal(self.current_covars, dim1=-2, dim2=-1)
         self.stds = torch.sqrt(self.vars)
+
+    def get_gaussian_ellipses(self, env_index: int):
+        gaussians = [(mu, sigma) for mu, sigma in zip(self.current_means[env_index],
+                                                      self.current_covars[env_index])]
+        std_devs = [x * 0.2 for x in range(0, 10)]
+        all_ellipses = []
+        for i, (mu, sigma) in enumerate(gaussians):
+            ellipses = []
+            for j in std_devs:
+                # Eigenvalues and eigenvectors of the covariance matrix
+                eigenvalues, eigenvectors = torch.linalg.eigh(sigma)
+
+                # Radii are proportional to the square root of the eigenvalues (scaled by std_devs)
+                radii_x, radii_y = j * torch.sqrt(eigenvalues)
+                # semi_minor, semi_major = j * torch.sqrt(eigenvalues)
+
+                # Note: The last eigenvalue/eigenvector are the largest, get angle wrt. x-axis.
+                # minor_rot = torch.atan2(eigenvectors[0][1], eigenvectors[0][0])
+                # major_rot = torch.atan2(eigenvectors[1][1], eigenvectors[1][0])
+                rot_angle = torch.atan2(eigenvectors[-1][1], eigenvectors[-1][0])
+                ellipses.append({
+                    'mean': mu,
+                    'radius': (radii_x, radii_y),
+                    'rot_angle': rot_angle
+                })
+            all_ellipses.append(ellipses)
+        return all_ellipses
+
+    def get_gaussian_grid_sample(self, env_index: int, sample_size: int = 2, n_samples: int = 200):
+        gaussians = [dist.Gaussian(mu, sigma, device=self.device)
+                     for mu, sigma in zip(self.current_means[env_index],
+                                          self.current_covars[env_index])]
+
+        all_gaussians = []
+        for g in gaussians:
+            # Eval gaussian grid-wise in worldspace and collect any pdf(x) > 2
+            np.set_printoptions(legacy='1.25')
+            X, Y, Z = g.eval_grid([-sample_size, sample_size, -sample_size, sample_size],
+                                  n_samples=n_samples)
+            ys, xs = np.where(Z > 0.5)
+            # Extract the world coordinates at each evaulation point. TODO: More thorough testing that this is correct.
+            marker_pos = [(X[0][xs[i]], Y[ys[i]][0], Z[ys[i]][xs[i]]) for i in range(len(xs))]
+
+            sample = []
+            if len(marker_pos) > 0:
+                # Normalise the z values for better rendering.
+                zs = [m[2] for m in marker_pos]
+                min_zs = np.min(zs)
+                max_zs = np.max(zs)
+                norm_markers = [(mp[0], mp[1], (mp[2] - min_zs) / (max_zs - min_zs)) for mp in marker_pos]
+                sample.extend(norm_markers)
+            all_gaussians.append(sample)
+        return all_gaussians
+
