@@ -163,9 +163,9 @@ class Lidar(Sensor):
         return geoms
 
 
-class ObjectDetectionCamera(Lidar):
+class ObjectDetectionSensor(Lidar):
     """
-    Extension of Lidar which returns an entity index for the ray intersection.
+    Abstract of object detection sensor which extends Lidar by returning an entity index for the ray intersection.
     Note: For now, this is a bit janky..
         - The entity is indexed by the progress of the ray-casting loop across all entities this sensor collides with
         - Note, Index is + 1, as 0 represents no hit.
