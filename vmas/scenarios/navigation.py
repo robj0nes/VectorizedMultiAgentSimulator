@@ -89,6 +89,7 @@ class Scenario(BaseScenario):
             )
 
             if self.use_gbp:
+                pose_count = 5
                 entity_filter_agents: Callable[[Entity], bool] = lambda e: isinstance(e, DOTSGBPAgent)
                 entity_filter_goals: Callable[[Entity], bool] = lambda e: isinstance(e, DOTSGBPGoal)
                 graph_dict = {
@@ -99,7 +100,17 @@ class Scenario(BaseScenario):
                     'goals': {
                         'nodes': [j for j in range(self.n_agents, self.n_agents * 2)],
                         'edges': [[i, j] for j in range(self.n_agents, self.n_agents * 2)]
+                    },
+                    'pose': {
+                        'nodes': [],
+                        'edges': []
                     }
+                    # 'pose': {
+                    #     'nodes': [j for j in range(self.n_agents * 2, self.n_agents * 2 + pose_count)],
+                    #     'edges': [[i, self.n_agents * 2]] + [[j, k] for j, k in zip(
+                    #         range(self.n_agents * 2, self.n_agents * 2 + pose_count-1),
+                    #         range(self.n_agents * 2 + 1, self.n_agents * 2 + pose_count))],
+                    # }
                 }
 
                 gbp = GaussianBeliefPropagation(graph_dict=graph_dict,

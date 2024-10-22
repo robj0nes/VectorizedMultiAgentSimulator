@@ -6,7 +6,7 @@ from torch_bp.graph import FactorGraph
 from torch_bp.graph.factors.linear_gaussian_factors import UnaryGaussianLinearFactor, PairwiseGaussianLinearFactor
 
 
-class GaussianBeliefPropagation():
+class GaussianBeliefPropagation:
     '''
     Takes a `graph_dict` which defines the nodes groups and relationships within the graph.
     Example where we assume node[0] is the robot hosting the graph:
@@ -84,6 +84,7 @@ class GaussianBeliefPropagation():
                                                     'dtype': torch.float64},
                                      batch_dim=self.batch_dim)
 
+
     def initialise_factor_graph(self):
         """Initialise a base FG to assign to all robots. This implementation defines factors between
         robots own positions, other robot positions, and goal positions."""
@@ -137,6 +138,8 @@ class GaussianBeliefPropagation():
     def get_gaussian_ellipses(self, env_index: int):
         gaussians = [(mu, sigma) for mu, sigma in zip(self.current_means[env_index],
                                                       self.current_covars[env_index])]
+        edge_pairs = [m for m in self.factor_neighbours if len(m) > 1]
+        edge_coords = [(self.current_means[env_index][m1], self.current_means[env_index][m2]) for (m1, m2) in edge_pairs]
         std_devs = [x * 0.2 for x in range(0, 10)]
         all_ellipses = []
         for i, (mu, sigma) in enumerate(gaussians):
@@ -159,7 +162,7 @@ class GaussianBeliefPropagation():
                     'rot_angle': rot_angle
                 })
             all_ellipses.append(ellipses)
-        return all_ellipses
+        return all_ellipses, edge_coords
 
     def get_gaussian_grid_sample(self, env_index: int, sample_size: int = 2, n_samples: int = 200):
         gaussians = [dist.Gaussian(mu, sigma, device=self.device)

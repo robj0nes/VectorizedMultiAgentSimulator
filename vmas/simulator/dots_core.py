@@ -98,12 +98,46 @@ class DOTSGBPAgent(DOTSAgent):
         self.world = world
         self.n_agents = n_agents
         self.n_goals = n_goals
+        self.pos_ticks = 0
+        self.curr_pose_anchor_index = 0
 
     def update_own_position_estimate(self):
-        # state.pos is derived from the simulator physics and serves as a suitable estimate of position.
-        if self.action.u is not None:
-            if torch.count_nonzero(self.action.u) > 0:
-                self.gbp.update_anchor(x=self.state.pos, anchor_index=self.agent_index)
+        # We set some window to handle position updates.
+        self.pos_ticks += 1
+        if self.pos_ticks % 5 == 0:
+            # state.pos is derived from the simulator physics and serves as a suitable estimate of position.
+            if self.action.u is not None:
+                if torch.count_nonzero(self.action.u) > 0:
+                    self.gbp.update_anchor(x=self.state.pos, anchor_index=self.agent_index)
+
+                    # # Note: Maybe instead, lets insert a new pairwise factor at index self.gbp.graph_dict['pose']['nodes'][0]
+                    # # and delete the factor at index self.gbp.graph_dict['pose']['nodes'][-1]
+                    # new_unary_factor = UnaryGaussianLinearFactor(
+                    #     self.gbp.unary_anchor_fn,
+                    #     self.state.pos,
+                    #     self.gbp.sigma * torch.eye(2, device=self.device, dtype=torch.float64)
+                    #     .unsqueeze(0).repeat(self.batch_dim, 1, 1),
+                    #     (torch.randn(self.batch_dim, 1, 2) * 2 + 2)
+                    #     .to(device=self.device, dtype=torch.float64),
+                    #     True
+                    # )
+                    # new_pw_factor = PairwiseGaussianLinearFactor(
+                    #     self.gbp.pairwise_dist_fn,
+                    #     self.gbp.init_dist_z_bias,
+                    #     self.gbp.init_dist_covar,
+                    #     torch.concat((self.state.pos,
+                    #                   self.gbp.factors[self.agent_index].nary_factor.energy_fn.get_current_bias()),
+                    #                  dim=-1).to(self.device),
+                    #     False
+                    # )
+                    # # TODO: This indexing is hardcoded: we need to find the correct pairwise factor we are replacing..
+                    # # TODO: Unclear whether this is enough to update the message passing infrastructure
+                    # self.gbp.factors.insert(self.gbp.graph_dict['pose']['nodes'][-5], new_unary_factor)
+                    # self.gbp.factors.pop(self.gbp.graph_dict['pose']['nodes'][-1])
+                    #
+                    # self.gbp.factors.insert(len(self.gbp.factors) - 5, new_pw_factor)
+                    # self.gbp.factors.pop(len(self.gbp.factors) - 1)
+        # self.gbp.gbp.update_beliefs(pass_messages=True)
 
     def estimate_goal_pos_from_sensors(self):
         if self.gbp.current_means is not None:
@@ -166,9 +200,11 @@ class DOTSGBPAgent(DOTSAgent):
 
     def render_gaussian_as_ellipse(self, env_index):
         geoms = []
-        gauss_ellipses = self.gbp.get_gaussian_ellipses(env_index)
+        gauss_ellipses, edge_coordinates = self.gbp.get_gaussian_ellipses(env_index)
         for i in range(len(gauss_ellipses)):
             entity_index = i % self.n_agents
+            if i >= self.n_agents * 2:
+                entity_index = self.agent_index
             for j, ellipse in enumerate(gauss_ellipses[i]):
                 mu = ellipse['mean']
                 radius = ellipse['radius']
@@ -183,6 +219,10 @@ class DOTSGBPAgent(DOTSAgent):
                 ring_xform.set_translation(mu[0], mu[1])
                 ring.add_attr(ring_xform)
                 geoms.append(ring)
+
+        for e in edge_coordinates:
+            line = rendering.Line((e[0][0], e[0][1]), (e[1][0], e[1][1]))
+            geoms.append(line)
         return geoms
 
     def render_gaussian_as_grid_sample(self, env_index):
