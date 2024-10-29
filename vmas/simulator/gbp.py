@@ -37,7 +37,9 @@ class GaussianBeliefPropagation:
         self.msgs_per_iter = msgs_per_iter
 
         self.total_nodes = 0
+        self.node_tags = []
         for k in self.graph_dict.keys():
+            self.node_tags.extend([k] * len(graph_dict[k]['nodes']))
             self.total_nodes += len(graph_dict[k]['nodes'])
 
         self.sigma = 0.05
@@ -73,17 +75,18 @@ class GaussianBeliefPropagation:
         grad_x = grad_fn(x).diagonal(dim1=0, dim2=1).transpose(1, 0)
         return grad_x[:, None, :], h_fn(x).unsqueeze(-1)
 
-    def initialise_gbp(self) -> LoopyLinearGaussianBP:
+    def initialise_gbp(self, node_means=None, node_covars=None) -> LoopyLinearGaussianBP:
         fac_grap = FactorGraph(num_nodes=self.total_nodes,
                                factors=self.factors,
-                               factor_neighbours=self.factor_neighbours)
+                               factor_neighbours=self.factor_neighbours,
+                               node_tags=self.node_tags)
 
-        return LoopyLinearGaussianBP(node_means=self.init_node_mu, node_covars=self.init_node_covar,
+        return LoopyLinearGaussianBP(node_means=self.init_node_mu if node_means is None else node_means,
+                                     node_covars=self.init_node_covar if node_covars is None else node_covars,
                                      factor_graph=fac_grap,
                                      tensor_kwargs={'device': self.device,
                                                     'dtype': torch.float64},
                                      batch_dim=self.batch_dim)
-
 
     def initialise_factor_graph(self):
         """Initialise a base FG to assign to all robots. This implementation defines factors between
@@ -108,25 +111,59 @@ class GaussianBeliefPropagation:
         self.factors.extend(anchor_factors)
 
         for key in self.graph_dict.keys():
-            dist_factors = [
-                PairwiseGaussianLinearFactor(
-                    self.pairwise_dist_fn,
-                    self.init_dist_z_bias,
-                    self.init_dist_covar,
-                    torch.concat(
-                        (self.init_node_mu[:, i],
-                         self.init_node_mu[:, j]),
-                        dim=-1)
-                    .to(self.device),
-                    False
-                )
-                for edge in self.graph_dict[key]['edges'] for i, j in [edge]
-            ]
-            self.factor_neighbours.extend([(i, j) for edge in self.graph_dict[key]['edges'] for i, j in [edge]])
-            self.factors.extend(dist_factors)
+            if 'edges' in self.graph_dict[key].keys():
+                dist_factors = [
+                    PairwiseGaussianLinearFactor(
+                        self.pairwise_dist_fn,
+                        self.init_dist_z_bias,
+                        self.init_dist_covar,
+                        torch.concat(
+                            (self.init_node_mu[:, i],
+                             self.init_node_mu[:, j]),
+                            dim=-1)
+                        .to(self.device),
+                        False
+                    )
+                    for edge in self.graph_dict[key]['edges'] for i, j in [edge]
+                ]
+                self.factor_neighbours.extend([(i, j) for edge in self.graph_dict[key]['edges'] for i, j in [edge]])
+                self.factors.extend(dist_factors)
+
+    def add_node(self, factors, factor_neighbours, node_tag, node_mean):
+        self.gbp.node_means = torch.cat((self.gbp.node_means, node_mean.unsqueeze(0)), dim=1).to(
+            self.device)
+        self.gbp.node_covars = torch.cat((self.gbp.node_covars, self.init_node_covar), dim=1).to(
+            self.device)
+        node_id, factor_id = self.gbp.factor_graph.add_node(factors, factor_neighbours, node_tag)
+
+        # TODO: Need to figure out how to correctly instantiate a new node and factor in the msg DB.,
+        self.gbp._precompute_factors()
+        for n_id in factor_neighbours:
+            self.gbp.msg_factor_to_node_db[(factor_id, n_id)] = (
+                self.gbp._compute_msg_from_factor(self.gbp.factor_graph.factor_clusters[factor_id], n_id))
+            self.gbp.msg_node_to_factor_db[(n_id, factor_id)] = (
+                self.gbp._compute_msg_from_node(n_id, factor_id))
 
     def update_anchor(self, x: torch.Tensor, anchor_index: int, env_index=None):
-        self.gbp.factor_graph.factor_clusters[anchor_index].factor.update_bias(x, batch_dim=env_index)
+        self.gbp.factor_graph.factor_clusters[anchor_index].factor.update_bias(new_z=x, batch_dim=env_index)
+
+    def update_node(self, new_mu: torch.Tensor, new_covar: torch.Tensor, node_index: int, env_index=None):
+        if env_index is None:
+            self.gbp.node_means[:, node_index] = new_mu
+            self.gbp.node_covars[:, node_index] = new_covar
+            self.update_anchor(new_mu, node_index, env_index)
+        else:
+            self.gbp.node_means[env_index, node_index] = new_mu
+            self.gbp.node_covars[env_index, node_index] = new_covar
+            self.update_anchor(new_mu, node_index, env_index)
+
+    def remake_graph(self):
+        # TODO: This is overwriting the new node_means and covars..
+        self.gbp = self.initialise_gbp(node_means=self.current_means, node_covars=self.current_covars)
+
+    def replace_factor_at(self, factor, index_in, index_out):
+        self.factors.insert(index_in, factor)
+        self.factors.pop(index_out)
 
     def iterate_gbp(self):
         self.current_means, self.current_covars = self.gbp.solve(num_iters=self.msg_passing_iters,
@@ -136,10 +173,11 @@ class GaussianBeliefPropagation:
         self.stds = torch.sqrt(self.vars)
 
     def get_gaussian_ellipses(self, env_index: int):
-        gaussians = [(mu, sigma) for mu, sigma in zip(self.current_means[env_index],
-                                                      self.current_covars[env_index])]
+        gaussians = [(mu, sigma) for mu, sigma in zip(self.gbp.node_means[env_index],
+                                                      self.gbp.node_covars[env_index])]
         edge_pairs = [m for m in self.factor_neighbours if len(m) > 1]
-        edge_coords = [(self.current_means[env_index][m1], self.current_means[env_index][m2]) for (m1, m2) in edge_pairs]
+        edge_coords = [(self.gbp.node_means[env_index][m1], self.gbp.node_means[env_index][m2]) for (m1, m2) in
+                       edge_pairs]
         std_devs = [x * 0.2 for x in range(0, 10)]
         all_ellipses = []
         for i, (mu, sigma) in enumerate(gaussians):
@@ -189,4 +227,3 @@ class GaussianBeliefPropagation:
                 sample.extend(norm_markers)
             all_gaussians.append(sample)
         return all_gaussians
-

@@ -101,43 +101,92 @@ class DOTSGBPAgent(DOTSAgent):
         self.pos_ticks = 0
         self.curr_pose_anchor_index = 0
 
+    def pose_update_2(self):
+        # Note version 2:
+        #   Maybe instead, lets insert a new pairwise factor at index self.gbp.graph_dict['pose']['nodes'][0]
+        #   and delete the factor at index self.gbp.graph_dict['pose']['nodes'][-1]
+        new_unary_factor = UnaryGaussianLinearFactor(
+            self.gbp.unary_anchor_fn,
+            torch.zeros(self.batch_dim, 2, device=self.device,
+                        dtype=self.gbp.dtype),
+            self.gbp.sigma * torch.eye(2, device=self.device, dtype=torch.float64)
+            .unsqueeze(0).repeat(self.batch_dim, 1, 1),
+            self.state.pos.to(self.device, dtype=self.gbp.dtype),
+            True
+        )
+        new_pw_factor = PairwiseGaussianLinearFactor(
+            self.gbp.pairwise_dist_fn,
+            self.gbp.init_dist_z_bias,
+            self.gbp.init_dist_covar,
+            torch.concat((self.state.pos,
+                          self.gbp.current_means[:, self.agent_index]),
+                         dim=-1).to(self.device),
+            False
+        )
+        # TODO: This indexing is hardcoded: we need to find the correct pairwise factor we are replacing..
+        # TODO: Unclear whether this is enough to update the message passing infrastructure
+        self.gbp.replace_factor_at(factor=new_unary_factor,
+                                   index_in=self.gbp.graph_dict['pose']['nodes'][-5],
+                                   index_out=self.gbp.graph_dict['pose']['nodes'][-1] + 1)
+        self.gbp.replace_factor_at(factor=new_pw_factor,
+                                   index_in=len(self.gbp.factors) - 5,
+                                   index_out=len(self.gbp.factors))
+
+        # Update the agent node with the most recent pose_estimate (state.pos)
+        self.gbp.update_anchor(x=self.state.pos, anchor_index=self.agent_index)
+        # self.gbp.remake_graph()
+
+    def pose_update_1(self):
+        # Note version 1: Shift poses along the pose-node list by making the current mean of
+        #           node x, the new bias of node x+1.
+        #          Update the agent-index unary factor bias with the latest position estimate.
+        # Iterate over all pose nodes in reverse order.
+        for i in self.gbp.graph_dict['pose']['nodes'][::-1]:
+            # Get the pose estimate from the previous pose-node (i-1).
+            if i == self.gbp.graph_dict['pose']['nodes'][0]:
+                prev_pose_mu = self.gbp.gbp.node_means[:, self.agent_index]
+                prev_pose_covar = self.gbp.gbp.node_covars[:, self.agent_index]
+            else:
+                prev_pose_mu = self.gbp.gbp.node_means[:, i - 1]
+                prev_pose_covar = self.gbp.gbp.node_covars[:, i - 1]
+
+            # Update the node details in the graph
+            self.gbp.update_node(new_mu=prev_pose_mu, new_covar=prev_pose_covar, node_index=i)
+            # Update the bias of the ith node with the previous estimate
+            # self.gbp.update_anchor(x=prev_pose, anchor_index=i)
+
+        # Update the agent node with the most recent pose_estimate (state.pos)
+        self.gbp.update_anchor(x=self.state.pos, anchor_index=self.agent_index)
+
     def update_own_position_estimate(self):
         # We set some window to handle position updates.
         self.pos_ticks += 1
-        if self.pos_ticks % 5 == 0:
+        if self.pos_ticks % 20 == 0:
             # state.pos is derived from the simulator physics and serves as a suitable estimate of position.
             if self.action.u is not None:
                 if torch.count_nonzero(self.action.u) > 0:
-                    self.gbp.update_anchor(x=self.state.pos, anchor_index=self.agent_index)
+                    self.add_new_pose_node()
+                    print()
+                    # NOTE: Used for parallel attempt
+                    # self.pose_update_1()
+                    # self.pose_update_2()  # ALT
 
-                    # # Note: Maybe instead, lets insert a new pairwise factor at index self.gbp.graph_dict['pose']['nodes'][0]
-                    # # and delete the factor at index self.gbp.graph_dict['pose']['nodes'][-1]
-                    # new_unary_factor = UnaryGaussianLinearFactor(
-                    #     self.gbp.unary_anchor_fn,
-                    #     self.state.pos,
-                    #     self.gbp.sigma * torch.eye(2, device=self.device, dtype=torch.float64)
-                    #     .unsqueeze(0).repeat(self.batch_dim, 1, 1),
-                    #     (torch.randn(self.batch_dim, 1, 2) * 2 + 2)
-                    #     .to(device=self.device, dtype=torch.float64),
-                    #     True
-                    # )
-                    # new_pw_factor = PairwiseGaussianLinearFactor(
-                    #     self.gbp.pairwise_dist_fn,
-                    #     self.gbp.init_dist_z_bias,
-                    #     self.gbp.init_dist_covar,
-                    #     torch.concat((self.state.pos,
-                    #                   self.gbp.factors[self.agent_index].nary_factor.energy_fn.get_current_bias()),
-                    #                  dim=-1).to(self.device),
-                    #     False
-                    # )
-                    # # TODO: This indexing is hardcoded: we need to find the correct pairwise factor we are replacing..
-                    # # TODO: Unclear whether this is enough to update the message passing infrastructure
-                    # self.gbp.factors.insert(self.gbp.graph_dict['pose']['nodes'][-5], new_unary_factor)
-                    # self.gbp.factors.pop(self.gbp.graph_dict['pose']['nodes'][-1])
-                    #
-                    # self.gbp.factors.insert(len(self.gbp.factors) - 5, new_pw_factor)
-                    # self.gbp.factors.pop(len(self.gbp.factors) - 1)
-        # self.gbp.gbp.update_beliefs(pass_messages=True)
+    def add_new_pose_node(self):
+        last_pns = sorted([x for x in self.gbp.gbp.factor_graph.node_clusters.values() if x.tag == 'pose'],
+                          key=lambda x: x.id)[-1]
+        factor = PairwiseGaussianLinearFactor(
+            self.gbp.pairwise_dist_fn,
+            self.gbp.init_dist_z_bias,
+            self.gbp.init_dist_covar,
+            torch.concat(
+                (self.gbp.gbp.node_means[:, last_pns.id],
+                 self.state.pos),
+                dim=-1)
+            .to(self.device),
+            False
+        )
+        fac_nbrs = (last_pns.id, self.gbp.gbp.factor_graph.N)
+        self.gbp.add_node(factors=factor, factor_neighbours=fac_nbrs, node_tag='pose', node_mean=self.state.pos)
 
     def estimate_goal_pos_from_sensors(self):
         if self.gbp.current_means is not None:
@@ -151,6 +200,13 @@ class DOTSGBPAgent(DOTSAgent):
                     self.update_entity_anchor(detections=detections,
                                               dists=dists,
                                               anchor_index=self.gbp.graph_dict['goals']['nodes'][i])
+
+    def exchange_beliefs(self, entity_index):
+        for i in range(self.gbp.current_means.shape[1]):
+            own_mu = self.gbp.current_means[:, i]
+            other_mu = self.world.agents[entity_index].gbp.current_means[:, i]
+            self.gbp.update_anchor(x=(own_mu + other_mu) / 2, anchor_index=i)
+            self.world.agents[entity_index].gbp.update_anchor(x=(own_mu + other_mu) / 2, anchor_index=i)
 
     def estimate_other_agent_pos_from_sensors(self):
         if self.gbp.current_means is not None:
@@ -175,6 +231,7 @@ class DOTSGBPAgent(DOTSAgent):
                         self.update_entity_anchor(detections=detections,
                                                   dists=dists,
                                                   anchor_index=i)
+                        # self.exchange_beliefs(entity_index=i)
 
     def update_entity_anchor(self, detections, dists, anchor_index):
         if len(detections.shape) == 1:
@@ -239,7 +296,6 @@ class DOTSGBPAgent(DOTSAgent):
                 geoms.append(marker)
         return geoms
 
-
     def render(self, env_index: int = 0, selected_agents: List[int] = None,
                show_gaussians: bool = False,
                show_lidar: bool = False) -> "List[Geom]":
@@ -264,9 +320,13 @@ class DOTSGBPWorld(DOTSWorld):
 
     def update_and_iterate_gbp(self, agent: DOTSGBPAgent):
         agent.update_own_position_estimate()
-        agent.estimate_other_agent_pos_from_sensors()
-        agent.estimate_goal_pos_from_sensors()
         agent.gbp.iterate_gbp()
+
+        # Note: For fully instantiate graph
+        # agent.update_own_position_estimate()
+        # agent.estimate_goal_pos_from_sensors()
+        # agent.estimate_other_agent_pos_from_sensors()
+        # agent.gbp.iterate_gbp()
 
 
 # Currently used to distinguish goal landmarks with Lidar filters.

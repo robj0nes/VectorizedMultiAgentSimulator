@@ -89,28 +89,34 @@ class Scenario(BaseScenario):
             )
 
             if self.use_gbp:
-                pose_count = 5
+                pose_count = 2
                 entity_filter_agents: Callable[[Entity], bool] = lambda e: isinstance(e, DOTSGBPAgent)
                 entity_filter_goals: Callable[[Entity], bool] = lambda e: isinstance(e, DOTSGBPGoal)
+                # graph_dict = {
+                #     'agents': {
+                #         'nodes': [j for j in range(self.n_agents)],
+                #         'edges': [[i, j] for j in range(self.n_agents) if i != j]
+                #     },
+                #     'goals': {
+                #         'nodes': [j for j in range(self.n_agents, self.n_agents * 2)],
+                #         'edges': [[i, j] for j in range(self.n_agents, self.n_agents * 2)]
+                #     },
+                #     # 'pose': {
+                #     #     'nodes': [],
+                #     #     'edges': []
+                #     # }
+                #     'pose': {
+                #         'nodes': [j for j in range(self.n_agents * 2, self.n_agents * 2 + pose_count)],
+                #         'edges': [[i, self.n_agents * 2]] + [[j, k] for j, k in zip(
+                #             range(self.n_agents * 2, self.n_agents * 2 + pose_count - 1),
+                #             range(self.n_agents * 2 + 1, self.n_agents * 2 + pose_count))],
+                #     }
+                # }
                 graph_dict = {
-                    'agents': {
-                        'nodes': [j for j in range(self.n_agents)],
-                        'edges': [[i, j] for j in range(self.n_agents) if i != j]
-                    },
-                    'goals': {
-                        'nodes': [j for j in range(self.n_agents, self.n_agents * 2)],
-                        'edges': [[i, j] for j in range(self.n_agents, self.n_agents * 2)]
-                    },
                     'pose': {
-                        'nodes': [],
-                        'edges': []
+                        'nodes': [0]
                     }
-                    # 'pose': {
-                    #     'nodes': [j for j in range(self.n_agents * 2, self.n_agents * 2 + pose_count)],
-                    #     'edges': [[i, self.n_agents * 2]] + [[j, k] for j, k in zip(
-                    #         range(self.n_agents * 2, self.n_agents * 2 + pose_count-1),
-                    #         range(self.n_agents * 2 + 1, self.n_agents * 2 + pose_count))],
-                    # }
+
                 }
 
                 gbp = GaussianBeliefPropagation(graph_dict=graph_dict,
@@ -228,7 +234,8 @@ class Scenario(BaseScenario):
         for i, agent in enumerate(self.world.agents):
             if self.use_gbp:
                 # Update our robot position anchor with the starting position.
-                agent.gbp.update_anchor(agent.state.pos, anchor_index=i, env_index=env_index)
+                # agent.gbp.update_anchor(agent.state.pos, anchor_index=i, env_index=env_index)
+                agent.gbp.update_anchor(agent.state.pos, anchor_index=0, env_index=env_index)
 
             if self.split_goals:
                 goal_index = int(i // self.agents_with_same_goal)
@@ -287,7 +294,6 @@ class Scenario(BaseScenario):
         pos_reward = self.pos_rew if self.shared_rew else agent.pos_rew
         return pos_reward + self.final_rew + agent.agent_collision_rew
 
-
     # Note: do we want to do pos-shaping in GBP verison?.. probably not!
     def agent_reward(self, agent: Agent):
         agent.distance_to_goal = torch.linalg.vector_norm(
@@ -305,34 +311,7 @@ class Scenario(BaseScenario):
         if self.use_gbp:
             # Process GBP msg passing before taking observations.
             self.world.update_and_iterate_gbp(agent)
-            sensor_meaurements = agent.sensors[0]._max_range - agent.sensors[0].measure()[0]
-            goal_poses = []
-            own_pos_est = agent.gbp.current_means[:, agent.agent_index]
-            if self.observe_all_goals:
-                for i in agent.gbp.graph_dict['goals']['nodes']:
-                    goal_pos_est = agent.gbp.current_means[:, i]
-                    goal_poses.append((own_pos_est - goal_pos_est).float())
-            else:
-                # We assume the goal index is the same as the agent_index
-                goal_index =agent.gbp.graph_dict['goals']['nodes'][agent.agent_index]
-                goal_pos_est = agent.gbp.current_means[:, goal_index]
-                goal_poses.append((own_pos_est - goal_pos_est).float())
-            return torch.cat(
-                [
-                    own_pos_est.float(),
-                    agent.state.vel
-                ]
-                + goal_poses
-                + (
-                    [sensor_meaurements]
-                    if self.collisions
-                    else []
-                ),
-                dim=-1,
-            )
-
-        else:
-            sensor_meaurements = agent.sensors[0]._max_range - agent.sensors[0].measure()
+            sensor_measurements = agent.sensors[0]._max_range - agent.sensors[0].measure()[0]
 
             goal_poses = []
             if self.observe_all_goals:
@@ -347,7 +326,56 @@ class Scenario(BaseScenario):
                 ]
                 + goal_poses
                 + (
-                    [sensor_meaurements]
+                    [sensor_measurements]
+                    if self.collisions
+                    else []
+                ),
+                dim=-1,
+            )
+
+            # sensor_measurements = agent.sensors[0]._max_range - agent.sensors[0].measure()[0]
+            # goal_poses = []
+            # own_pos_est = agent.gbp.current_means[:, agent.agent_index]
+            # if self.observe_all_goals:
+            #     for i in agent.gbp.graph_dict['goals']['nodes']:
+            #         goal_pos_est = agent.gbp.current_means[:, i]
+            #         goal_poses.append((own_pos_est - goal_pos_est).float())
+            # else:
+            #     # We assume the goal index is the same as the agent_index
+            #     goal_index = agent.gbp.graph_dict['goals']['nodes'][agent.agent_index]
+            #     goal_pos_est = agent.gbp.current_means[:, goal_index]
+            #     goal_poses.append((own_pos_est - goal_pos_est).float())
+            # return torch.cat(
+            #     [
+            #         own_pos_est.float(),
+            #         agent.state.vel
+            #     ]
+            #     + goal_poses
+            #     + (
+            #         [sensor_measurements]
+            #         if self.collisions
+            #         else []
+            #     ),
+            #     dim=-1,
+            # )
+
+        else:
+            sensor_measurements = agent.sensors[0]._max_range - agent.sensors[0].measure()
+
+            goal_poses = []
+            if self.observe_all_goals:
+                for a in self.world.agents:
+                    goal_poses.append(agent.state.pos - a.goal.state.pos)
+            else:
+                goal_poses.append(agent.state.pos - agent.goal.state.pos)
+            return torch.cat(
+                [
+                    agent.state.pos,
+                    agent.state.vel,
+                ]
+                + goal_poses
+                + (
+                    [sensor_measurements]
                     if self.collisions
                     else []
                 ),
@@ -506,5 +534,6 @@ if __name__ == "__main__":
         __file__,
         control_two_agents=False,
         use_gbp=True,
-        lidar_range=0.2
+        lidar_range=0.2,
+        n_agents=3
     )
