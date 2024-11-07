@@ -43,6 +43,7 @@ class Sensor(ABC):
         raise NotImplementedError
 
 
+
 class Lidar(Sensor):
     def __init__(
         self,
@@ -73,6 +74,7 @@ class Lidar(Sensor):
         self._entity_filter = entity_filter
         self._render_color = render_color
         self._alpha = alpha
+
 
     def to(self, device: torch.device):
         self._angles = self._angles.to(device)
@@ -159,3 +161,49 @@ class Lidar(Sensor):
                 geoms.append(ray)
                 geoms.append(ray_circ)
         return geoms
+
+
+class ObjectDetectionSensor(Lidar):
+    """
+    Abstract of object detection sensor which extends Lidar by returning an entity index for the ray intersection.
+    Note: For now, this is a bit janky..
+        - The entity is indexed by the progress of the ray-casting loop across all entities this sensor collides with
+        - Note, Index is + 1, as 0 represents no hit.
+    TODO: Improve return to provide some explicit identification for the entity.
+    """
+    def __init__(self,
+                 world: vmas.simulator.core.World,
+                 **kwargs):
+        super().__init__(world, **kwargs)
+        self._last_entities=None
+
+    def measure(self, vectorized: bool = True):
+        if not vectorized:
+            dists = []
+            entities = []
+            for angle in self._angles.unbind(1):
+                measurement, entity = self._world.cast_ray(
+                        self.agent,
+                        angle + self.agent.state.rot.squeeze(-1),
+                        max_range=self._max_range,
+                        entity_filter=self.entity_filter,
+                        detect_non_collidables=True,
+                        return_entity=True
+                    )
+                dists.append(measurement)
+                entities.append(entity)
+            measurement = torch.stack(dists, dim=1)
+            entities = torch.stack(entities, dim=1)
+
+        else:
+            measurement, entities = self._world.cast_rays(
+                self.agent,
+                self._angles + self.agent.state.rot,
+                max_range=self._max_range,
+                entity_filter=self.entity_filter,
+                detect_non_collidables=True,
+                return_entity=True
+            )
+        self._last_measurement = measurement
+        self._last_entities = entities
+        return measurement, entities

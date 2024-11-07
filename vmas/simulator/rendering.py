@@ -124,8 +124,8 @@ class Viewer(object):
     def set_bounds(self, left, right, bottom, top):
         assert right > left and top > bottom
         # NOTE: Introducing this to debug information
-        left *= 3
-        bottom *= 3
+        # left *= 3
+        # bottom *= 3
 
         self.bounds = torch.tensor([left, right, bottom, top], device=left.device)
         scalex = self.width / (right - left)
@@ -524,16 +524,24 @@ def render_function_util(
 
 
 def make_circle(radius=10, res=30, filled=True, angle=2 * math.pi, proportion=1):
+
     return make_ellipse(
-        radius_x=radius, radius_y=radius, res=res, filled=filled, angle=angle, proportion=proportion
+        radius_x=radius, radius_y=radius, res=res, filled=filled, angle=angle
     )
 
+def make_ellipse(radius_x=10, radius_y=5, res=30, filled=True, angle=2 * math.pi, rotation=None):
 
-def make_ellipse(radius_x=10, radius_y=5, res=30, filled=True, angle=2 * math.pi, proportion=1):
     points = []
     for i in range(res):
-        ang = -angle / 2 + (proportion * angle * i / res)
-        points.append((math.cos(ang) * radius_x, math.sin(ang) * radius_y))
+        ang = -angle / 2 + angle * i / res
+        x = radius_x * math.cos(ang)
+        y = radius_y * math.sin(ang)
+
+        if rotation:
+            x = x * math.cos(rotation) - y * math.sin(rotation)
+            y = x * math.sin(rotation) + y * math.cos(rotation)
+
+        points.append((x, y))
     if angle % (2 * math.pi) != 0:
         points.append((0, 0))
     if filled:

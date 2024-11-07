@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import math
 import typing
+import re
 from abc import ABC, abstractmethod
 from typing import Callable, List, Sequence, Tuple, Union
 
@@ -764,7 +765,7 @@ class Entity(TorchVectorizedObject, Observable, ABC):
         super().to(device)
         self.state.to(device)
 
-    def render(self, env_index: int = 0) -> "List[Geom]":
+    def render(self, env_index: int = 0, **kwargs) -> "List[Geom]":
         from vmas.simulator import rendering
 
         if not self.is_rendering[env_index]:
@@ -1630,6 +1631,8 @@ class World(TorchVectorizedObject):
         angles: Tensor,
         max_range: float,
         entity_filter: Callable[[Entity], bool] = lambda _: False,
+        detect_non_collidables: bool = False,
+        return_entity: bool = False
     ):
         pos = entity.state.pos
 
@@ -1643,9 +1646,10 @@ class World(TorchVectorizedObject):
         for e in self.entities:
             if entity is e or not entity_filter(e):
                 continue
-            assert e.collides(entity) and entity.collides(
-                e
-            ), "Rays are only casted among collidables"
+            if not detect_non_collidables:
+                assert e.collides(entity) and entity.collides(
+                    e
+                ), "Rays are only casted among collidables"
             if isinstance(e.shape, Box):
                 d = self._cast_ray_to_box(e, pos, angles, max_range)
             elif isinstance(e.shape, Sphere):
@@ -1655,8 +1659,11 @@ class World(TorchVectorizedObject):
             else:
                 raise RuntimeError(f"Shape {e.shape} currently not handled by cast_ray")
             dists.append(d)
-        dist, _ = torch.min(torch.stack(dists, dim=-1), dim=-1)
-        return dist
+        dist, entity = torch.min(torch.stack(dists, dim=-1), dim=-1)
+        if return_entity:
+            return dist, entity
+        else:
+            return dist
 
     def cast_rays(
         self,
@@ -1664,6 +1671,8 @@ class World(TorchVectorizedObject):
         angles: Tensor,
         max_range: float,
         entity_filter: Callable[[Entity], bool] = lambda _: False,
+        detect_non_collidables: bool = False,
+        return_entity: bool = False
     ):
         pos = entity.state.pos
 
@@ -1677,9 +1686,10 @@ class World(TorchVectorizedObject):
         for e in self.entities:
             if entity is e or not entity_filter(e):
                 continue
-            assert e.collides(entity) and entity.collides(
-                e
-            ), "Rays are only casted among collidables"
+            if not detect_non_collidables:
+                assert e.collides(entity) and entity.collides(
+                    e
+                ), "Rays are only casted among collidables"
             if isinstance(e.shape, Box):
                 boxes.append(e)
             elif isinstance(e.shape, Sphere):
@@ -1781,8 +1791,11 @@ class World(TorchVectorizedObject):
             )
             dists = torch.cat([dists, dist_lines.transpose(-1, -2)], dim=-1)
 
-        dist, _ = torch.min(dists, dim=-1)
-        return dist
+        dist, ent_indicies = torch.min(dists, dim=-1)
+        if return_entity:
+            return dist, ent_indicies
+        else:
+            return dist
 
     def get_distance_from_point(
         self, entity: Entity, test_point_pos, env_index: int = None

@@ -8,10 +8,12 @@ import torch
 from torch import Tensor
 
 from vmas import render_interactively
-from vmas.simulator.core import Agent, Entity, Landmark, Sphere, World
+from vmas.simulator.gbp import GaussianBeliefPropagation
+from vmas.simulator.core import Agent, Entity, Landmark, Sphere, World, Box
+from vmas.simulator.dots_core import DOTSGBPWorld, DOTSGBPAgent, DOTSGBPGoal
 from vmas.simulator.heuristic_policy import BaseHeuristicPolicy
 from vmas.simulator.scenario import BaseScenario
-from vmas.simulator.sensors import Lidar
+from vmas.simulator.sensors import Lidar, ObjectDetectionSensor
 from vmas.simulator.utils import Color, ScenarioUtils, X, Y
 
 if typing.TYPE_CHECKING:
@@ -23,6 +25,7 @@ class Scenario(BaseScenario):
         self.plot_grid = False
         self.n_agents = kwargs.pop("n_agents", 4)
         self.collisions = kwargs.pop("collisions", True)
+        self.use_gbp = kwargs.pop("use_gbp", False)
 
         self.agents_with_same_goal = kwargs.pop("agents_with_same_goal", 1)
         self.split_goals = kwargs.pop("split_goals", False)
@@ -53,12 +56,15 @@ class Scenario(BaseScenario):
         # agents_with_same_goal = 1: all independent goals
         if self.split_goals:
             assert (
-                self.n_agents % 2 == 0
-                and self.agents_with_same_goal == self.n_agents // 2
+                    self.n_agents % 2 == 0
+                    and self.agents_with_same_goal == self.n_agents // 2
             ), "Splitting the goals is allowed when the agents are even and half the team has the same goal"
 
         # Make world
-        world = World(batch_dim, device, substeps=2)
+        if self.use_gbp:
+            world = DOTSGBPWorld(batch_dim, device)
+        else:
+            world = World(batch_dim, device, substeps=2)
 
         known_colors = [
             (0.22, 0.49, 0.72),
@@ -82,36 +88,112 @@ class Scenario(BaseScenario):
                 else colors[i - len(known_colors)]
             )
 
-            # Constraint: all agents have same action range and multiplier
-            agent = Agent(
-                name=f"agent_{i}",
-                collide=self.collisions,
-                color=color,
-                shape=Sphere(radius=self.agent_radius),
-                render_action=True,
-                sensors=(
-                    [
-                        Lidar(
-                            world,
-                            n_rays=12,
-                            max_range=self.lidar_range,
-                            entity_filter=entity_filter_agents,
-                        ),
-                    ]
-                    if self.collisions
-                    else None
-                ),
-            )
+            if self.use_gbp:
+                pose_count = 2
+                entity_filter_agents: Callable[[Entity], bool] = lambda e: isinstance(e, DOTSGBPAgent)
+                entity_filter_goals: Callable[[Entity], bool] = lambda e: isinstance(e, DOTSGBPGoal)
+                # graph_dict = {
+                #     'agents': {
+                #         'nodes': [j for j in range(self.n_agents)],
+                #         'edges': [[i, j] for j in range(self.n_agents) if i != j]
+                #     },
+                #     'goals': {
+                #         'nodes': [j for j in range(self.n_agents, self.n_agents * 2)],
+                #         'edges': [[i, j] for j in range(self.n_agents, self.n_agents * 2)]
+                #     },
+                #     # 'pose': {
+                #     #     'nodes': [],
+                #     #     'edges': []
+                #     # }
+                #     'pose': {
+                #         'nodes': [j for j in range(self.n_agents * 2, self.n_agents * 2 + pose_count)],
+                #         'edges': [[i, self.n_agents * 2]] + [[j, k] for j, k in zip(
+                #             range(self.n_agents * 2, self.n_agents * 2 + pose_count - 1),
+                #             range(self.n_agents * 2 + 1, self.n_agents * 2 + pose_count))],
+                #     }
+                # }
+                graph_dict = {
+                    'pose': {
+                        'nodes': [0]
+                    }
+
+                }
+
+                gbp = GaussianBeliefPropagation(graph_dict=graph_dict,
+                                                msg_passing_iters=1,
+                                                msgs_per_iter=1,
+                                                batch_dim=batch_dim,
+                                                device=device)
+                # Note: For now assumes n_agents == n_goals
+                agent = DOTSGBPAgent(
+                    name=f"agent_{i}",
+                    gbp=gbp,
+                    collide=self.collisions,
+                    color=color,
+                    shape=Sphere(radius=self.agent_radius),
+                    render_action=True,
+                    world=world,
+                    n_agents=self.n_agents,
+                    n_goals=self.n_agents,
+                    sensors=(
+                        [
+                            ObjectDetectionSensor(
+                                world,
+                                n_rays=16,
+                                max_range=self.lidar_range,
+                                entity_filter=entity_filter_agents,
+                            ),
+                            ObjectDetectionSensor(
+                                world,
+                                n_rays=16,
+                                max_range=self.lidar_range,
+                                entity_filter=entity_filter_goals,
+                            )
+                        ]
+                        if self.collisions
+                        else None
+                    ),
+                    tensor_args={"batch_dim": batch_dim, "device": device}
+                )
+
+            else:
+                # Constraint: all agents have same action range and multiplier
+                agent = Agent(
+                    name=f"agent_{i}",
+                    collide=self.collisions,
+                    color=color,
+                    shape=Sphere(radius=self.agent_radius),
+                    render_action=True,
+                    sensors=(
+                        [
+                            Lidar(
+                                world,
+                                n_rays=12,
+                                max_range=self.lidar_range,
+                                entity_filter=entity_filter_agents,
+                            ),
+                        ]
+                        if self.collisions
+                        else None
+                    ),
+                )
             agent.pos_rew = torch.zeros(batch_dim, device=device)
             agent.agent_collision_rew = agent.pos_rew.clone()
             world.add_agent(agent)
 
             # Add goals
-            goal = Landmark(
-                name=f"goal {i}",
-                collide=False,
-                color=color,
-            )
+            if self.use_gbp:
+                goal = DOTSGBPGoal(
+                    name=f"goal {i}",
+                    collide=False,
+                    color=color
+                )
+            else:
+                goal = Landmark(
+                    name=f"goal {i}",
+                    collide=False,
+                    color=color,
+                )
             world.add_landmark(goal)
             agent.goal = goal
 
@@ -150,6 +232,11 @@ class Scenario(BaseScenario):
             occupied_positions = torch.cat([occupied_positions, position], dim=1)
 
         for i, agent in enumerate(self.world.agents):
+            if self.use_gbp:
+                # Update our robot position anchor with the starting position.
+                # agent.gbp.update_anchor(agent.state.pos, anchor_index=i, env_index=env_index)
+                agent.gbp.update_anchor(agent.state.pos, anchor_index=0, env_index=env_index)
+
             if self.split_goals:
                 goal_index = int(i // self.agents_with_same_goal)
             else:
@@ -159,18 +246,18 @@ class Scenario(BaseScenario):
 
             if env_index is None:
                 agent.pos_shaping = (
-                    torch.linalg.vector_norm(
-                        agent.state.pos - agent.goal.state.pos,
-                        dim=1,
-                    )
-                    * self.pos_shaping_factor
+                        torch.linalg.vector_norm(
+                            agent.state.pos - agent.goal.state.pos,
+                            dim=1,
+                        )
+                        * self.pos_shaping_factor
                 )
             else:
                 agent.pos_shaping[env_index] = (
-                    torch.linalg.vector_norm(
-                        agent.state.pos[env_index] - agent.goal.state.pos[env_index]
-                    )
-                    * self.pos_shaping_factor
+                        torch.linalg.vector_norm(
+                            agent.state.pos[env_index] - agent.goal.state.pos[env_index]
+                        )
+                        * self.pos_shaping_factor
                 )
 
     def reward(self, agent: Agent):
@@ -199,14 +286,15 @@ class Scenario(BaseScenario):
                         distance = self.world.get_distance(a, b)
                         a.agent_collision_rew[
                             distance <= self.min_collision_distance
-                        ] += self.agent_collision_penalty
+                            ] += self.agent_collision_penalty
                         b.agent_collision_rew[
                             distance <= self.min_collision_distance
-                        ] += self.agent_collision_penalty
+                            ] += self.agent_collision_penalty
 
         pos_reward = self.pos_rew if self.shared_rew else agent.pos_rew
         return pos_reward + self.final_rew + agent.agent_collision_rew
 
+    # Note: do we want to do pos-shaping in GBP verison?.. probably not!
     def agent_reward(self, agent: Agent):
         agent.distance_to_goal = torch.linalg.vector_norm(
             agent.state.pos - agent.goal.state.pos,
@@ -220,29 +308,84 @@ class Scenario(BaseScenario):
         return agent.pos_rew
 
     def observation(self, agent: Agent):
-        goal_poses = []
-        if self.observe_all_goals:
-            for a in self.world.agents:
-                goal_poses.append(agent.state.pos - a.goal.state.pos)
+        if self.use_gbp:
+            # Process GBP msg passing before taking observations.
+            self.world.update_and_iterate_gbp(agent)
+            sensor_measurements = agent.sensors[0]._max_range - agent.sensors[0].measure()[0]
+
+            goal_poses = []
+            if self.observe_all_goals:
+                for a in self.world.agents:
+                    goal_poses.append(agent.state.pos - a.goal.state.pos)
+            else:
+                goal_poses.append(agent.state.pos - agent.goal.state.pos)
+            return torch.cat(
+                [
+                    agent.state.pos,
+                    agent.state.vel,
+                ]
+                + goal_poses
+                + (
+                    [sensor_measurements]
+                    if self.collisions
+                    else []
+                ),
+                dim=-1,
+            )
+
+            # sensor_measurements = agent.sensors[0]._max_range - agent.sensors[0].measure()[0]
+            # goal_poses = []
+            # own_pos_est = agent.gbp.current_means[:, agent.agent_index]
+            # if self.observe_all_goals:
+            #     for i in agent.gbp.graph_dict['goals']['nodes']:
+            #         goal_pos_est = agent.gbp.current_means[:, i]
+            #         goal_poses.append((own_pos_est - goal_pos_est).float())
+            # else:
+            #     # We assume the goal index is the same as the agent_index
+            #     goal_index = agent.gbp.graph_dict['goals']['nodes'][agent.agent_index]
+            #     goal_pos_est = agent.gbp.current_means[:, goal_index]
+            #     goal_poses.append((own_pos_est - goal_pos_est).float())
+            # return torch.cat(
+            #     [
+            #         own_pos_est.float(),
+            #         agent.state.vel
+            #     ]
+            #     + goal_poses
+            #     + (
+            #         [sensor_measurements]
+            #         if self.collisions
+            #         else []
+            #     ),
+            #     dim=-1,
+            # )
+
         else:
-            goal_poses.append(agent.state.pos - agent.goal.state.pos)
-        return torch.cat(
-            [
-                agent.state.pos,
-                agent.state.vel,
-            ]
-            + goal_poses
-            + (
-                [agent.sensors[0]._max_range - agent.sensors[0].measure()]
-                if self.collisions
-                else []
-            ),
-            dim=-1,
-        )
+            sensor_measurements = agent.sensors[0]._max_range - agent.sensors[0].measure()
+
+            goal_poses = []
+            if self.observe_all_goals:
+                for a in self.world.agents:
+                    goal_poses.append(agent.state.pos - a.goal.state.pos)
+            else:
+                goal_poses.append(agent.state.pos - agent.goal.state.pos)
+            return torch.cat(
+                [
+                    agent.state.pos,
+                    agent.state.vel,
+                ]
+                + goal_poses
+                + (
+                    [sensor_measurements]
+                    if self.collisions
+                    else []
+                ),
+                dim=-1,
+            )
 
     def done(self):
         return torch.stack(
             [
+
                 torch.linalg.vector_norm(
                     agent.state.pos - agent.goal.state.pos,
                     dim=-1,
@@ -262,7 +405,6 @@ class Scenario(BaseScenario):
 
     def extra_render(self, env_index: int = 0) -> "List[Geom]":
         from vmas.simulator import rendering
-
         geoms: List[Geom] = []
 
         # Communication lines
@@ -323,19 +465,19 @@ class HeuristicPolicy(BaseHeuristicPolicy):
 
         # Laypunov function
         V_value = (
-            (agent_pos[:, X] - goal_pos[:, X]) ** 2
-            + 0.5 * (agent_pos[:, X] - goal_pos[:, X]) * agent_vel[:, X]
-            + agent_vel[:, X] ** 2
-            + (agent_pos[:, Y] - goal_pos[:, Y]) ** 2
-            + 0.5 * (agent_pos[:, Y] - goal_pos[:, Y]) * agent_vel[:, Y]
-            + agent_vel[:, Y] ** 2
+                (agent_pos[:, X] - goal_pos[:, X]) ** 2
+                + 0.5 * (agent_pos[:, X] - goal_pos[:, X]) * agent_vel[:, X]
+                + agent_vel[:, X] ** 2
+                + (agent_pos[:, Y] - goal_pos[:, Y]) ** 2
+                + 0.5 * (agent_pos[:, Y] - goal_pos[:, Y]) * agent_vel[:, Y]
+                + agent_vel[:, Y] ** 2
         )
 
         LfV_val = (2 * (agent_pos[:, X] - goal_pos[:, X]) + agent_vel[:, X]) * (
             agent_vel[:, X]
         ) + (2 * (agent_pos[:, Y] - goal_pos[:, Y]) + agent_vel[:, Y]) * (
-            agent_vel[:, Y]
-        )
+                      agent_vel[:, Y]
+                  )
         LgV_vals = torch.stack(
             [
                 0.5 * (agent_pos[:, X] - goal_pos[:, X]) + 2 * agent_vel[:, X],
@@ -355,7 +497,7 @@ class HeuristicPolicy(BaseHeuristicPolicy):
         constraints = []
 
         # QP Cost F = u^T @ u + clf_slack**2
-        qp_objective = cp.Minimize(cp.sum_squares(u) + self.clf_slack * clf_slack**2)
+        qp_objective = cp.Minimize(cp.sum_squares(u) + self.clf_slack * clf_slack ** 2)
 
         # control bounds between u_range
         constraints += [u <= u_range]
@@ -390,5 +532,8 @@ class HeuristicPolicy(BaseHeuristicPolicy):
 if __name__ == "__main__":
     render_interactively(
         __file__,
-        control_two_agents=True,
+        control_two_agents=False,
+        use_gbp=True,
+        lidar_range=0.2,
+        n_agents=3
     )

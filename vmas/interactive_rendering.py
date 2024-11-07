@@ -76,6 +76,9 @@ class InteractiveEnv:
 
         self.text_lines = []
         self.font_size = 15
+        # TODO: Create more generic way of toggling rendering elements.
+        self.show_gaussians = False  # Passed down render chain to allow for toggling on/off
+        self.show_lidar = False      # Passed down render chain to allow for toggling on/off
         self.env.render()
         self.text_idx = len(self.env.unwrapped().text_lines)
         self._init_text()
@@ -104,6 +107,7 @@ class InteractiveEnv:
                 self.reset = False
                 total_rew = [0] * self.n_agents
 
+<<<<<<< HEAD
 
             if self.n_agents > 0:
                 action_list = [[0.0] * agent.action_size for agent in self.agents]
@@ -122,6 +126,32 @@ class InteractiveEnv:
                     : self.agents[self.current_agent_index2].dynamics.needed_action_size
                 ]
 
+=======
+            # Note: Updated this as coms weren't included as part of action in original implementation
+            # dim_c = self.env.env.world.dim_c if self.env.env.world.dim_c is not None else 0
+            action_list = [
+                [0.0] * agent.action_size for agent in self.agents
+            ]
+            # Append current coms state to action list
+            for i in range(self.n_agents):
+                if not self.agents[i].silent:
+                    action_list[i] += self.c[i].tolist()
+
+            action_list[self.current_agent_index][:self.agents[self.current_agent_index].action_size] = self.u[
+                                                                                                        : self.agents[
+                                                                                                            self.current_agent_index].action_size
+                                                                                                        ]
+            action_list[self.current_agent_index][self.agents[self.current_agent_index].action_size:] = self.c[
+                self.current_agent_index]
+
+            if self.n_agents > 1 and self.control_two_agents:
+                action_list[self.current_agent_index2][:self.agents[self.current_agent_index].action_size] = self.u2[
+                                                                                                             :
+                                                                                                             self.agents[
+                                                                                                                 self.current_agent_index2].action_size
+                                                                                                             ]
+
+>>>>>>> gbp_with_poses
             obs, rew, done, info = self.env.step(action_list)
 
             if self.display_info and self.n_agents > 0:
@@ -148,6 +178,10 @@ class InteractiveEnv:
             frame = self.env.render(
                 mode="rgb_array" if self.save_render else "human",
                 visualize_when_rgb=True,
+                selected_agents=[self.current_agent_index] if not self.control_two_agents
+                else [self.current_agent_index, self.current_agent_index2],
+                show_gaussians=self.show_gaussians,
+                show_lidar=self.show_lidar,
             )
             if self.save_render:
                 self.frame_list.append(frame)
@@ -174,6 +208,8 @@ class InteractiveEnv:
 
         agent_range = self.agents[self.current_agent_index].action.u_range_tensor
         try:
+
+
             if k == key.LEFT:
                 self.keys[0] = agent_range[0]
             elif k == key.RIGHT:
@@ -195,6 +231,11 @@ class InteractiveEnv:
                         self.current_agent_index = self._increment_selected_agent_index(
                             self.current_agent_index
                         )
+            elif k == key.G:
+                self.show_gaussians = not self.show_gaussians
+            elif k == key.L:
+                self.show_lidar = not self.show_lidar
+
 
             elif k == key._0:
                 self.c[self.current_agent_index][0] += 0.1
