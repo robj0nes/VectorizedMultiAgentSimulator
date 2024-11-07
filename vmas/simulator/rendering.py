@@ -64,7 +64,6 @@ except ImportError:
         "'xvfb-run -s \"-screen 0 1400x900x24\" python <your_script.py>'"
     )
 
-
 if "Apple" in sys.version:
     if "DYLD_FALLBACK_LIBRARY_PATH" in os.environ:
         os.environ["DYLD_FALLBACK_LIBRARY_PATH"] += ":/usr/lib"
@@ -279,11 +278,11 @@ class LineWidth(Attr):
 
 class TextLine(Geom):
     def __init__(
-        self,
-        text: str = "",
-        font_size: int = 15,
-        x: float = 0.0,
-        y: float = 0.0,
+            self,
+            text: str = "",
+            font_size: int = 15,
+            x: float = 0.0,
+            y: float = 0.0,
     ):
         super().__init__()
 
@@ -454,16 +453,16 @@ class Grid(Geom):
 
 
 def render_function_util(
-    f: Callable,
-    plot_range: Union[
-        float,
-        Tuple[float, float],
-        Tuple[Tuple[float, float], Tuple[float, float]],
-    ],
-    precision: float = 0.01,
-    cmap_range: Optional[Tuple[float, float]] = None,
-    cmap_alpha: float = 1.0,
-    cmap_name: str = "viridis",
+        f: Callable,
+        plot_range: Union[
+            float,
+            Tuple[float, float],
+            Tuple[Tuple[float, float], Tuple[float, float]],
+        ],
+        precision: float = 0.01,
+        cmap_range: Optional[Tuple[float, float]] = None,
+        cmap_alpha: float = 1.0,
+        cmap_name: str = "viridis",
 ):
     if isinstance(plot_range, int) or isinstance(plot_range, float):
         x_min = -plot_range
@@ -523,6 +522,7 @@ def render_function_util(
 
     return geom
 
+
 def make_circle(radius=10, res=30, filled=True, angle=2 * math.pi, proportion=1):
     return make_ellipse(
         radius_x=radius, radius_y=radius, res=res, filled=filled, angle=angle, proportion=proportion
@@ -561,6 +561,5 @@ def make_capsule(length, width):
     circ1.add_attr(Transform(translation=(length, 0)))
     geom = Compound([box, circ0, circ1])
     return geom
-
 
 # ================================================================
