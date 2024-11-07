@@ -20,6 +20,9 @@ if typing.TYPE_CHECKING:
     from vmas.simulator.rendering import Geom
 
 
+# Note: Parking GBP Explorations for now. Needs more consideration to apply within this framework.
+#   - Dynamic graph is important, but how can this be managed efficiently across parallel training envs?
+
 class Scenario(BaseScenario):
     def make_world(self, batch_dim: int, device: torch.device, **kwargs):
         self.plot_grid = False
