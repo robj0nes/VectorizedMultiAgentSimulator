@@ -30,6 +30,16 @@ class Scenario(BaseScenario):
         self.collisions = kwargs.pop("collisions", True)
         self.use_gbp = kwargs.pop("use_gbp", False)
 
+        self.world_spawning_x = kwargs.pop(
+            "world_spawning_x", 1
+        )  # X-coordinate limit for entities spawning
+        self.world_spawning_y = kwargs.pop(
+            "world_spawning_y", 1
+        )  # Y-coordinate limit for entities spawning
+        self.enforce_bounds = kwargs.pop(
+            "enforce_bounds", False
+        )  # If False, the world is unlimited; else, constrained by world_spawning_x and world_spawning_y.
+
         self.agents_with_same_goal = kwargs.pop("agents_with_same_goal", 1)
         self.split_goals = kwargs.pop("split_goals", False)
         self.observe_all_goals = kwargs.pop("observe_all_goals", False)
@@ -37,6 +47,7 @@ class Scenario(BaseScenario):
         self.lidar_range = kwargs.pop("lidar_range", 0.35)
         self.agent_radius = kwargs.pop("agent_radius", 0.1)
         self.comms_range = kwargs.pop("comms_range", 0)
+        self.n_lidar_rays = kwargs.pop("n_lidar_rays", 12)
 
         self.shared_rew = kwargs.pop("shared_rew", True)
         self.pos_shaping_factor = kwargs.pop("pos_shaping_factor", 1)
@@ -46,8 +57,14 @@ class Scenario(BaseScenario):
         ScenarioUtils.check_kwargs_consumed(kwargs)
 
         self.min_distance_between_entities = self.agent_radius * 2 + 0.05
-        self.world_semidim = 1
         self.min_collision_distance = 0.005
+
+        if self.enforce_bounds:
+            self.x_semidim = self.world_spawning_x
+            self.y_semidim = self.world_spawning_y
+        else:
+            self.x_semidim = None
+            self.y_semidim = None
 
         assert 1 <= self.agents_with_same_goal <= self.n_agents
         if self.agents_with_same_goal > 1:
@@ -180,6 +197,7 @@ class Scenario(BaseScenario):
                         else None
                     ),
                 )
+
             agent.pos_rew = torch.zeros(batch_dim, device=device)
             agent.agent_collision_rew = agent.pos_rew.clone()
             world.add_agent(agent)
@@ -211,8 +229,8 @@ class Scenario(BaseScenario):
             self.world,
             env_index,
             self.min_distance_between_entities,
-            (-self.world_semidim, self.world_semidim),
-            (-self.world_semidim, self.world_semidim),
+            (-self.world_spawning_x, self.world_spawning_x),
+            (-self.world_spawning_y, self.world_spawning_y),
         )
 
         occupied_positions = torch.stack(
@@ -228,8 +246,8 @@ class Scenario(BaseScenario):
                 env_index=env_index,
                 world=self.world,
                 min_dist_between_entities=self.min_distance_between_entities,
-                x_bounds=(-self.world_semidim, self.world_semidim),
-                y_bounds=(-self.world_semidim, self.world_semidim),
+                x_bounds=(-self.world_spawning_x, self.world_spawning_x),
+                y_bounds=(-self.world_spawning_y, self.world_spawning_y),
             )
             goal_poses.append(position.squeeze(1))
             occupied_positions = torch.cat([occupied_positions, position], dim=1)
