@@ -468,7 +468,7 @@ class Environment(TorchVectorizedObject):
                 1 if not agent.silent and self.world.dim_c != 0 else 0
             )
         else:
-            return 1
+            return agent.action_size
 
     def get_agent_action_space(self, agent: Agent):
         if self.continuous_actions:
@@ -606,6 +606,8 @@ class Environment(TorchVectorizedObject):
         return [self.get_random_action(agent) for agent in self.agents]
 
     def _check_discrete_action(self, action: Tensor, low: int, high: int, type: str):
+        # if not action.abs().sum().item() == 0:
+        #     print()
         assert torch.all(
             (action >= torch.tensor(low, device=self.device))
             * (action < torch.tensor(high, device=self.device))
@@ -618,8 +620,8 @@ class Environment(TorchVectorizedObject):
         if not self.grad_enabled:
             action = action.detach()
         action = action.to(self.device)
-        if action.isnan().any():
-            print()
+        # if action.isnan().any():
+        #     print()
         assert not action.isnan().any()
         agent.action.u = torch.zeros(
             self.batch_dim,
@@ -657,7 +659,7 @@ class Environment(TorchVectorizedObject):
             agent.action.u = physical_action.to(torch.float32)
 
         else:
-            if not self.multidiscrete_actions:
+            if self.multidiscrete_actions:
                 # This bit of code translates the discrete action (taken from a space that
                 # is the cartesian product of all action spaces) into a multi discrete action.
                 # This is done by iteratively taking the modulo of the action and dividing by the

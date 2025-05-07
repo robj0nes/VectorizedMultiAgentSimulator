@@ -44,6 +44,8 @@ class InteractiveEnv:
             display_info: bool = True,
             save_render: bool = False,
             render_name: str = "interactive",
+            discrete_control: bool = False,
+            action_size: int = None,
     ):
         self.env = env
         self.control_two_agents = control_two_agents
@@ -53,15 +55,19 @@ class InteractiveEnv:
         self.n_agents = self.env.unwrapped.n_agents
         self.agents = self.env.unwrapped.agents
         self.continuous = self.env.unwrapped.continuous_actions
+        self.action_size = action_size
+        self.discrete_control = discrete_control
+
         self.reset = False
         self.keys = np.array(
-            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        )  # up, down, left, right, rot+, rot-
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        )  # up, down, left, right, rot+, rot-, interact_with
         self.keys2 = np.array(
-            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
-        )  # up, down, left, right, rot+, rot-
-        self.u = [0] * (3 if self.continuous else 2)
-        self.u2 = [0] * (3 if self.continuous else 2)
+            [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+        )  # up, down, left, right, rot+, rot-, interact_with
+
+        self.u = [0] * (action_size if action_size is not None else 3 if self.continuous else 2)
+        self.u2 = [0] * (action_size if action_size is not None else 3 if self.continuous else 2)
 
         self.c = np.array([[0.0] * self.env.env.world.dim_c] * self.n_agents)
 
@@ -131,6 +137,13 @@ class InteractiveEnv:
 
             obs, rew, done, info = self.env.step(action_list)
 
+            # Reset U space so key press is only recorded once.
+            if self.discrete_control:
+                for i, _ in enumerate(self.u):
+                    self.u[i] = 0
+                for i, _ in enumerate(self.u2):
+                    self.u2[i] = 0
+
             if self.display_info and self.n_agents > 0:
                 # TODO: Determine number of lines of obs_str and render accordingly
                 obs_str = str(InteractiveEnv.format_obs(obs[self.current_agent_index]))
@@ -193,6 +206,8 @@ class InteractiveEnv:
                 self.keys[4] = agent_range[2]
             elif k == key.N:
                 self.keys[5] = agent_range[2]
+            elif k == key.B:
+                self.keys[6] = agent_range[3]
             elif k == key.TAB:
                 self.current_agent_index = self._increment_selected_agent_index(
                     self.current_agent_index
@@ -233,7 +248,8 @@ class InteractiveEnv:
                     self.keys2[4] = agent2_range[2]
                 elif k == key.Q:
                     self.keys2[5] = agent2_range[2]
-
+                elif k == key.Z:
+                    self.keys2[6] = agent2_range[3]
                 elif k == key.LSHIFT:
                     self.current_agent_index2 = self._increment_selected_agent_index(
                         self.current_agent_index2
@@ -244,6 +260,7 @@ class InteractiveEnv:
                                 self.current_agent_index2
                             )
                         )
+
         except IndexError:
             print("Action not available")
 
@@ -251,6 +268,7 @@ class InteractiveEnv:
             self.reset = True
 
         self.set_u()
+
 
     def _key_release(self, k, mod):
         from pyglet.window import key
@@ -267,6 +285,8 @@ class InteractiveEnv:
             self.keys[4] = 0
         elif k == key.N:
             self.keys[5] = 0
+        elif k == key.B:
+            self.keys[6] = 0
 
         if self.control_two_agents:
             if k == key.A:
@@ -281,21 +301,28 @@ class InteractiveEnv:
                 self.keys2[4] = 0
             elif k == key.Q:
                 self.keys2[5] = 0
-
+            elif k == key.Z:
+                self.keys2[6] = 0
         self.set_u()
 
     def set_u(self):
         if self.continuous:
-            self.u = [
+            # TODO: Want to handle additional actions..
+            self.u[:3] = [
                 self.keys[1] - self.keys[0],
                 self.keys[3] - self.keys[2],
                 self.keys[4] - self.keys[5],
             ]
-            self.u2 = [
+            self.u2[:3] = [
                 self.keys2[1] - self.keys2[0],
                 self.keys2[3] - self.keys2[2],
                 self.keys2[4] - self.keys2[5],
             ]
+            if self.action_size > 3:
+                for i in range(3, self.action_size):
+                    self.u[i] = self.keys[2 * i]
+                    self.u2[i] = self.keys2[2 * i]
+
         else:
             if np.sum(self.keys[:4]) >= 1:
                 self.u[0] = np.argmax(self.keys[:4]) + 1
@@ -330,6 +357,9 @@ def render_interactively(
         control_two_agents: bool = False,
         display_info: bool = True,
         save_render: bool = False,
+        seed: int = 0,
+        discrete_control: bool = False,
+        action_size: int = None,
         **kwargs,
 ):
     """Executes a scenario and renders it so that you can debug and control agents interactively.
@@ -367,19 +397,22 @@ def render_interactively(
             scenario=scenario,
             num_envs=1,
             device="cpu",
-            continuous_actions=True,
+            # continuous_actions=True,
             wrapper="gym",
-            seed=0,
+            seed=seed,
             wrapper_kwargs={"return_numpy": False},
             # Environment specific variables
             **kwargs,
         ),
         control_two_agents=control_two_agents,
+        discrete_control=discrete_control,
+        action_size=action_size,
         display_info=display_info,
         save_render=save_render,
         render_name=f"{scenario}_interactive"
         if isinstance(scenario, str)
         else "interactive",
+
     )
 
 

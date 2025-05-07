@@ -35,6 +35,9 @@ class GymWrapper(gym.Env, BaseGymWrapper):
 
     def step(self, action):
         action = self._action_list_to_tensor(action)
+        # for a in action:
+        #     if not a.abs().sum().item() == 0:
+        #         print()
         obs, rews, done, info = self._env.step(action)
         env_data = self._convert_env_data(
             obs=obs,
