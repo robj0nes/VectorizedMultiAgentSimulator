@@ -15,6 +15,7 @@ from vmas.simulator.rendering import Geom
 from vmas.simulator.scenario import BaseScenario
 from vmas.simulator.utils import AGENT_REWARD_TYPE, AGENT_OBS_TYPE, Color
 
+
 class GridStatus(Enum):
     EMPTY = 0
     BENCH_PASSABLE = 1
@@ -193,12 +194,11 @@ class Scenario(BaseScenario):
         """
         Returns agent cell position, plant cell positions and plant colours (ie. states)
         """
-        return torch.stack(
-            [
-                agent.state.cell_pos,
-                [f.state.cell_pos for f in self.plants],
-                [f.state.color for f in self.plants],
-            ]
+        return torch.cat(
+            [agent.state.cell_pos] +
+            [f.state.cell_pos for f in self.plants] +
+            [f.state.color for f in self.plants]
+            , dim=-1
         )
 
     # Per-step reward function. Currently only shared rewards implemented.
@@ -234,16 +234,21 @@ class Scenario(BaseScenario):
 
         return self.rew
 
-    def check_vertical_movement(self, curr_cell: torch.Tensor, next_cell: torch.Tensor) -> torch.tensor:
-        cstate = self.cells[:, curr_cell[:, 0], curr_cell[:, 1], curr_cell[:, 2], -1]
-        nstate = self.cells[:, next_cell[:, 0], next_cell[:, 1], next_cell[:, 2], -1]
+    def check_vertical_movement(self, curr_cell: torch.Tensor, next_cell: torch.Tensor,
+                                vert_move: torch.Tensor) -> torch.tensor:
+        result_mask = torch.zeros(self.world.batch_dim, device=self.world.device, dtype=torch.bool)
+
+        cstate = self.cells[vert_move, curr_cell[vert_move, 0], curr_cell[vert_move, 1], curr_cell[vert_move, 2], -1]
+        nstate = self.cells[vert_move, next_cell[vert_move, 0], next_cell[vert_move, 1], next_cell[vert_move, 2], -1]
         cmask = torch.Tensor((cstate == GridStatus.BENCH_PASSABLE.value) |
                              (cstate == GridStatus.PLANT.value) |
                              (cstate == GridStatus.FLOWER.value))
         nmask = torch.Tensor((nstate == GridStatus.BENCH_PASSABLE.value) |
                              (nstate == GridStatus.PLANT.value) |
                              (nstate == GridStatus.FLOWER.value))
-        return torch.logical_and(cmask, nmask).squeeze(-1)
+        active_mask = torch.logical_and(cmask, nmask)
+        result_mask[vert_move] = active_mask
+        return result_mask
 
     def handle_movement(self, agent, action):
         movement = action[:, :3].to(torch.int)
@@ -261,21 +266,25 @@ class Scenario(BaseScenario):
 
         # Note: Check this with more than 1 env.
         if torch.any(vertical_moves):
-            illegal_moves = illegal_moves | self.check_vertical_movement(agent.state.cell_pos[vertical_moves],
-                                                                         next_cell[vertical_moves])
+            illegal_moves = illegal_moves | self.check_vertical_movement(agent.state.cell_pos,
+                                                                         next_cell, vertical_moves)
 
         if torch.any(horizontal_moves):
-            next_state = self.cells[horizontal_moves, next_cell[:, 0], next_cell[:, 1], next_cell[:, 2], -1]
+            result_mask = torch.zeros(self.world.batch_dim, device=self.world.device, dtype=torch.bool)
+            next_state = self.cells[horizontal_moves, next_cell[horizontal_moves, 0],
+                                    next_cell[horizontal_moves, 1], next_cell[horizontal_moves, 2], -1]
             next_mask = next_state == GridStatus.BENCH_OBSTACLE.value
-            illegal_moves = illegal_moves | next_mask
+            result_mask[horizontal_moves] = next_mask
+            illegal_moves = illegal_moves | result_mask
 
         if torch.any(illegal_moves):
             # TODO: Apply (per-agent) negative reward to batches with illegal moves.
             legal_moves = ~illegal_moves
-            agent.state.pos[legal_moves] = self.cells[legal_moves, ncx, ncy, ncz, :2].squeeze(1)
-            agent.state.cell_pos[legal_moves] = next_cell
+            agent.state.pos[legal_moves] = self.cells[legal_moves, ncx[legal_moves], ncy[legal_moves], ncz[legal_moves], :2].squeeze(1)
+            agent.state.cell_pos[legal_moves] = next_cell[legal_moves]
         else:
-            agent.state.pos = self.cells[:, ncx, ncy, ncz, :2].squeeze(1)
+            batch_indices = torch.arange(self.world.batch_dim)
+            agent.state.pos = self.cells[batch_indices, ncx, ncy, ncz, :2]
             agent.state.cell_pos = next_cell
 
     def handle_pollination(self, agent, action):
@@ -284,10 +293,11 @@ class Scenario(BaseScenario):
 
         pollinate = action[:, 3].to(torch.int)  # Get batches where agent action is to 'pollinate'
         c_pos = agent.state.cell_pos
-        on_flower = (self.cells[:, c_pos[:, 0],
-                     c_pos[:, 1], c_pos[:, 2], -1]
-                     == GridStatus.FLOWER.value)  # Get batches where agent pos == flower pos
-        pollinated = (pollinate & on_flower).squeeze(-1).to(torch.bool)  # Mask for <on_flower> && <pollinate action>
+        batch_indices = torch.arange(self.world.batch_dim, device=self.world.device)
+
+        on_flower = (self.cells[batch_indices, c_pos[:, 0], c_pos[:, 1], c_pos[:, 2], -1] == GridStatus.FLOWER.value)  # Get batches where agent pos == flower pos
+        pollinated = torch.logical_and(pollinate, on_flower)
+        # pollinated = (pollinate & on_flower).squeeze(-1).to(torch.bool)  # Mask for <on_flower> && <pollinate action>
 
         if pollinated.any():
             # Update cell status and flower colour
@@ -485,12 +495,8 @@ class Scenario(BaseScenario):
 
         for x in range(self.grid_size[0]):
             for y in range(self.grid_size[1]):
-                if y == self.grid_size[1] - 1:
-                    print()
                 x_cent = -self.world.x_semidim + (self.cell_size * x) + self.cell_size / 2
                 y_cent = -self.world.y_semidim + y_offset + (self.cell_size * y) + self.cell_size / 2
-
-                # cell_status = self.check_and_render_bench_cells(x, y, grid_index, x_cent, y_cent)
 
                 if env_index is not None:
                     self.cells[env_index, x, y, grid_index] = torch.tensor([
